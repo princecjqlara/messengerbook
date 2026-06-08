@@ -1,0 +1,12 @@
+{
+  "name": "followup-os",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check app.js && node --check server.js"
+  },
+  "dependencies": {
+    "pg": "^8.21.0"
+  }
+}

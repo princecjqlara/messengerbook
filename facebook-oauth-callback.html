@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Facebook Login</title>
+  </head>
+  <body>
+    <script>
+      const params = new URLSearchParams(location.hash.slice(1) || location.search.slice(1));
+      const payload = {
+        type: "facebook-oauth-callback",
+        accessToken: params.get("access_token") || "",
+        error: params.get("error_message") || params.get("error_description") || params.get("error") || "",
+      };
+      if (window.opener) window.opener.postMessage(payload, location.origin);
+      window.close();
+    </script>
+    Facebook login complete. You can close this window.
+  </body>
+</html>
