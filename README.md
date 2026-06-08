@@ -70,4 +70,8 @@ The live backend should connect these local workflows to:
 - Messenger Send API for messages inside the allowed messaging window.
 - Approved utility templates for messages after the human-agent window.
 - Supabase tables for app users and tenant state. The next production hardening step is splitting tenant JSON into dedicated tenant-scoped tables for contacts, messages, templates, schedules, bookings, and audit logs.
-- A scheduler or queue worker for best-time follow-up delivery.
+- Scheduled jobs can be triggered by cron-job.org every 1 minute:
+  - Set `CRON_SECRET` in the server environment.
+  - Set `INTERNAL_SCHEDULER_ENABLED=false` in production if cron-job.org is the scheduler.
+  - Configure cron-job.org to call `https://YOUR_DOMAIN/api/cron/scheduled-tasks?token=YOUR_CRON_SECRET` every minute.
+  - The endpoint runs first-24-hour follow-ups, unfinished-booking follow-ups, and generic Messenger-name repair.

@@ -15,6 +15,8 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const META_APP_ID = process.env.META_APP_ID;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "test_token";
+const CRON_SECRET = process.env.CRON_SECRET || "";
+const INTERNAL_SCHEDULER_ENABLED = process.env.INTERNAL_SCHEDULER_ENABLED !== "false";
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
 const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET;
@@ -25,6 +27,7 @@ const DEFAULT_BOOKING_ABANDONED_MESSAGE = "Hi {{firstName}}, you can still finis
 const DEFAULT_FIRST24_FIBONACCI_MINUTES = [10, 20, 30];
 const bookingOpenTimers = new Map();
 let automaticFollowUpScanRunning = false;
+let scheduledTasksRunning = false;
 
 const seedState = {
   currentUserId: null,
@@ -440,6 +443,17 @@ function requestOrigin(request) {
   return `${proto}://${request.headers.host}`;
 }
 
+function requireCronAuth(request, requestUrl) {
+  if (!CRON_SECRET) throw new ApiError(500, "CRON_SECRET is not configured.");
+  const auth = String(request.headers.authorization || "");
+  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
+  const headerSecret = String(request.headers["x-cron-secret"] || "").trim();
+  const querySecret = String(requestUrl.searchParams.get("token") || "").trim();
+  if (![bearer, headerSecret, querySecret].some((value) => value && value === CRON_SECRET)) {
+    throw new ApiError(401, "Invalid cron token.");
+  }
+}
+
 function bookingUrlForTenant(tenant, origin, contact = null) {
   const slug = tenant.booking?.slug || "booking";
   const params = new URLSearchParams({
@@ -838,6 +852,70 @@ async function refreshGenericContactNames() {
   } catch (error) {
     console.warn("Generic contact name refresh failed:", error.message);
     return { changed: false, error: error.message };
+  }
+}
+
+async function scanAbandonedBookingFollowUps(origin = PUBLIC_ORIGIN) {
+  const tenants = await fetchTenants();
+  let sent = 0;
+  let skipped = 0;
+  let changed = false;
+  for (const tenant of tenants) {
+    const delayMinutes = Math.max(1, Number(tenant.followUp?.bookingAbandonedDelayMinutes || 5));
+    for (const contact of tenant.contacts || []) {
+      if (!contact.psid || contact.booked || contact.bookingAbandonedFollowUpSent) {
+        skipped += 1;
+        continue;
+      }
+      const openedAt = new Date(contact.lastBookingOpenedAt || 0);
+      if (!Number.isFinite(openedAt.getTime())) {
+        skipped += 1;
+        continue;
+      }
+      const continuedAt = new Date(contact.lastBookingContinuedAt || 0);
+      if (Number.isFinite(continuedAt.getTime()) && continuedAt >= openedAt) {
+        skipped += 1;
+        continue;
+      }
+      if (Date.now() - openedAt.getTime() < delayMinutes * 60000) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const result = await sendAbandonedBookingFollowUp(tenant, contact, origin);
+        if (result.sent) {
+          sent += 1;
+          changed = true;
+        } else {
+          skipped += 1;
+        }
+      } catch (error) {
+        tenantLog(tenant, `Booking-page follow-up failed for ${contact.name}: ${error.message}`);
+        changed = true;
+      }
+    }
+  }
+  if (changed) await upsertTenants(tenants);
+  return { sent, skipped };
+}
+
+async function runScheduledTasks(origin = PUBLIC_ORIGIN) {
+  if (scheduledTasksRunning) return { skipped: true, reason: "scheduled tasks already running" };
+  scheduledTasksRunning = true;
+  try {
+    const startedAt = new Date().toISOString();
+    await scanAutomaticFollowUps(origin);
+    const abandoned = await scanAbandonedBookingFollowUps(origin);
+    const names = await refreshGenericContactNames();
+    return {
+      skipped: false,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+      abandoned,
+      contactNamesChanged: Boolean(names.changed),
+    };
+  } finally {
+    scheduledTasksRunning = false;
   }
 }
 
@@ -1412,6 +1490,12 @@ async function handleApi(request, response) {
     });
     return;
   }
+  if ((request.method === "GET" || request.method === "POST") && requestUrl.pathname === "/api/cron/scheduled-tasks") {
+    requireCronAuth(request, requestUrl);
+    const result = await runScheduledTasks(PUBLIC_ORIGIN || requestOrigin(request));
+    sendJson(response, 200, { ok: true, ...result });
+    return;
+  }
   if (request.method === "POST" && requestUrl.pathname === "/api/state") {
     const body = await readJson(request);
     await syncStateToSupabase(body.state || {});
@@ -1542,8 +1626,8 @@ const server = http.createServer(async (request, response) => {
 
 server.listen(PORT, () => {
   console.log(`FollowUp OS server running on http://127.0.0.1:${PORT}`);
-  scanAutomaticFollowUps().catch((error) => console.warn("Initial automatic follow-up scan failed:", error.message));
-  refreshGenericContactNames().catch((error) => console.warn("Initial contact name refresh failed:", error.message));
-  setInterval(() => scanAutomaticFollowUps(), 60000);
-  setInterval(() => refreshGenericContactNames(), 5 * 60000);
+  if (INTERNAL_SCHEDULER_ENABLED) {
+    runScheduledTasks().catch((error) => console.warn("Initial scheduled tasks failed:", error.message));
+    setInterval(() => runScheduledTasks(), 60000);
+  }
 });
