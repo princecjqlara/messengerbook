@@ -15,7 +15,6 @@ const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const META_APP_ID = process.env.META_APP_ID;
 const META_APP_SECRET = process.env.META_APP_SECRET;
 const META_VERIFY_TOKEN = process.env.META_VERIFY_TOKEN || "test_token";
-const CRON_SECRET = process.env.CRON_SECRET || "";
 const INTERNAL_SCHEDULER_ENABLED = process.env.INTERNAL_SCHEDULER_ENABLED !== "false";
 const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME;
 const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY;
@@ -441,17 +440,6 @@ function updateLastInboundMessage(contact, at, text) {
 function requestOrigin(request) {
   const proto = String(request.headers["x-forwarded-proto"] || "").split(",")[0] || (request.socket.encrypted ? "https" : "http");
   return `${proto}://${request.headers.host}`;
-}
-
-function requireCronAuth(request, requestUrl) {
-  if (!CRON_SECRET) throw new ApiError(500, "CRON_SECRET is not configured.");
-  const auth = String(request.headers.authorization || "");
-  const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const headerSecret = String(request.headers["x-cron-secret"] || "").trim();
-  const querySecret = String(requestUrl.searchParams.get("token") || "").trim();
-  if (![bearer, headerSecret, querySecret].some((value) => value && value === CRON_SECRET)) {
-    throw new ApiError(401, "Invalid cron token.");
-  }
 }
 
 function bookingUrlForTenant(tenant, origin, contact = null) {
@@ -1491,7 +1479,6 @@ async function handleApi(request, response) {
     return;
   }
   if ((request.method === "GET" || request.method === "POST") && requestUrl.pathname === "/api/cron/scheduled-tasks") {
-    requireCronAuth(request, requestUrl);
     const result = await runScheduledTasks(PUBLIC_ORIGIN || requestOrigin(request));
     sendJson(response, 200, { ok: true, ...result });
     return;

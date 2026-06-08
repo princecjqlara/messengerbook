@@ -28,7 +28,6 @@ Set these environment variables in Vercel:
 - `APP_URL=https://messengerbook.vercel.app`
 - `BOOKING_BASE_URL=https://messengerbook.vercel.app`
 - `INTERNAL_SCHEDULER_ENABLED=false`
-- `CRON_SECRET`
 - `SUPABASE_URL`
 - `SUPABASE_ANON_KEY`
 - `SUPABASE_SERVICE_ROLE_KEY`
@@ -42,7 +41,7 @@ Set these environment variables in Vercel:
 Use cron-job.org every 1 minute:
 
 ```text
-https://messengerbook.vercel.app/api/cron/scheduled-tasks?token=YOUR_CRON_SECRET
+https://messengerbook.vercel.app/api/cron/scheduled-tasks
 ```
 
 Demo sign-ins:
@@ -98,7 +97,6 @@ The live backend should connect these local workflows to:
 - Approved utility templates for messages after the human-agent window.
 - Supabase tables for app users and tenant state. The next production hardening step is splitting tenant JSON into dedicated tenant-scoped tables for contacts, messages, templates, schedules, bookings, and audit logs.
 - Scheduled jobs can be triggered by cron-job.org every 1 minute:
-  - Set `CRON_SECRET` in the server environment.
   - Set `INTERNAL_SCHEDULER_ENABLED=false` in production if cron-job.org is the scheduler.
-  - Configure cron-job.org to call `https://YOUR_DOMAIN/api/cron/scheduled-tasks?token=YOUR_CRON_SECRET` every minute.
+  - Configure cron-job.org to call `https://YOUR_DOMAIN/api/cron/scheduled-tasks` every minute.
   - The endpoint runs first-24-hour follow-ups, unfinished-booking follow-ups, and generic Messenger-name repair.
