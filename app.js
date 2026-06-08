@@ -1,4 +1,4 @@
-const BUILD_ID = "contact-name-refresh-1";
+const BUILD_ID = "admin-login-clean-1";
 const STORAGE_KEY = "followup_os_state_v4";
 const LEGACY_STORAGE_KEYS = ["followup_os_state_v3", "followup_os_state_v2", "followup_os_state_v1"];
 const META_APP_ID = "2656336981385560";
@@ -29,7 +29,7 @@ const seedState = {
     {
       id: "user_head",
       name: "Head Admin",
-      email: "headadmin@example.com",
+      email: "admin@messengerbook.com",
       password: "admin123",
       role: "head_admin",
       loginToken: "head-admin-token",
@@ -174,7 +174,7 @@ function repairState(input) {
   repaired.users = repaired.users.map((user, index) => ({
     id: user.id || `user_${index + 1}`,
     name: user.name || (user.role === "head_admin" ? "Head Admin" : `User ${index + 1}`),
-    email: user.email || (user.role === "head_admin" ? "headadmin@example.com" : `user${index + 1}@example.com`),
+    email: user.email || (user.role === "head_admin" ? "admin@messengerbook.com" : `user${index + 1}@example.com`),
     password: user.password || (user.role === "head_admin" ? "admin123" : "password123"),
     role: user.role === "head_admin" ? "head_admin" : "user",
     loginToken: user.loginToken || createToken(),
@@ -2069,13 +2069,13 @@ function renderLogin() {
       <section class="login-panel">
         <form class="panel stack" id="loginForm">
           <h2>Sign in</h2>
-          <label class="field"><span>Email</span><input name="email" type="email" required value="headadmin@example.com"></label>
-          <label class="field"><span>Password</span><input name="password" type="password" required value="admin123"></label>
+          <label class="field"><span>Email</span><input name="email" type="email" required autocomplete="username"></label>
+          <label class="field"><span>Password</span><input name="password" type="password" required autocomplete="current-password"></label>
           <button class="btn primary" type="submit">Sign in</button>
           <button class="btn" type="button" id="repairState">Repair local state</button>
           <div class="login-demo">
             <strong>Accounts</strong>
-            <span>Head admin: headadmin@example.com / admin123</span>
+            <span>Head admin account is configured by the app environment.</span>
             <span>Tenant users sign in with the email and password created by admin.</span>
             <span>Build: ${BUILD_ID}</span>
           </div>

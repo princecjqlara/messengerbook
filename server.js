@@ -4,7 +4,7 @@ const path = require("path");
 
 const ROOT = __dirname;
 const PORT = Number(process.env.PORT || 3000);
-const HEAD_ADMIN_EMAIL = process.env.HEAD_ADMIN_EMAIL || "headadmin@example.com";
+const HEAD_ADMIN_EMAIL = process.env.HEAD_ADMIN_EMAIL || "admin@messengerbook.com";
 const HEAD_ADMIN_PASSWORD = process.env.HEAD_ADMIN_PASSWORD || "admin123";
 
 loadEnv(path.join(ROOT, ".env"));

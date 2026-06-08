@@ -46,7 +46,7 @@ https://messengerbook.vercel.app/api/cron/scheduled-tasks
 
 Demo sign-ins:
 
-- Head admin: `headadmin@example.com` / `admin123`
+- Head admin: `admin@messengerbook.com` / `admin123`
 
 Tenant login:
 
