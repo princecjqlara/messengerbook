@@ -1603,7 +1603,7 @@ async function handleWebhook(request, response) {
   sendJson(response, 405, { error: "Webhook method not allowed." });
 }
 
-const server = http.createServer(async (request, response) => {
+async function appHandler(request, response) {
   try {
     if (request.url.startsWith("/webhook") || request.url.startsWith("/api/webhook")) {
       await handleWebhook(request, response);
@@ -1622,12 +1622,17 @@ const server = http.createServer(async (request, response) => {
       error: needsSchema ? `${message}. Run supabase/schema.sql in the Supabase SQL editor.` : message,
     });
   }
-});
+}
 
-server.listen(PORT, () => {
-  console.log(`FollowUp OS server running on http://127.0.0.1:${PORT}`);
-  if (INTERNAL_SCHEDULER_ENABLED) {
-    runScheduledTasks().catch((error) => console.warn("Initial scheduled tasks failed:", error.message));
-    setInterval(() => runScheduledTasks(), 60000);
-  }
-});
+if (require.main === module) {
+  const server = http.createServer(appHandler);
+  server.listen(PORT, () => {
+    console.log(`FollowUp OS server running on http://127.0.0.1:${PORT}`);
+    if (INTERNAL_SCHEDULER_ENABLED) {
+      runScheduledTasks().catch((error) => console.warn("Initial scheduled tasks failed:", error.message));
+      setInterval(() => runScheduledTasks(), 60000);
+    }
+  });
+}
+
+module.exports = appHandler;

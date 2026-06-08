@@ -18,6 +18,33 @@ http://127.0.0.1:3000/index.html
 
 Before using real cross-browser tenant login, run [supabase/schema.sql](supabase/schema.sql) in the Supabase SQL editor.
 
+## Vercel
+
+This repo includes `vercel.json` so Vercel serves the static app and routes backend requests to `server.js` as a serverless function.
+
+Set these environment variables in Vercel:
+
+- `APP_ENV=production`
+- `APP_URL=https://messengerbook.vercel.app`
+- `BOOKING_BASE_URL=https://messengerbook.vercel.app`
+- `INTERNAL_SCHEDULER_ENABLED=false`
+- `CRON_SECRET`
+- `SUPABASE_URL`
+- `SUPABASE_ANON_KEY`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `CLOUDINARY_CLOUD_NAME`
+- `CLOUDINARY_API_KEY`
+- `CLOUDINARY_API_SECRET`
+- `META_APP_ID`
+- `META_APP_SECRET`
+- `META_VERIFY_TOKEN`
+
+Use cron-job.org every 1 minute:
+
+```text
+https://messengerbook.vercel.app/api/cron/scheduled-tasks?token=YOUR_CRON_SECRET
+```
+
 Demo sign-ins:
 
 - Head admin: `headadmin@example.com` / `admin123`
