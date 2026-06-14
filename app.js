@@ -58,6 +58,7 @@ function createBlankTenant(id = `tenant_${uid().slice(0, 8)}`) {
       welcomeMessage: "Hi {{firstName}}, you can book a time here.",
       welcomeEnabled: true,
       buttonLabel: "Choose a time",
+      buttonMode: "both",
       welcomeMediaUrl: "",
       welcomeMediaType: "",
       autoAbFollowUpEnabled: true,
@@ -263,6 +264,7 @@ function normalizeTenant(tenant) {
   normalized.followUp.first24FibonacciMinutes = normalizeFirst24Intervals(normalized.followUp.first24FibonacciMinutes);
   normalized.pageConnected = Boolean(normalized.pageConnected || normalized.pageAccessToken || normalized.pageId);
   normalized.contacts = dedupeTenantContacts(normalized);
+  normalized.messenger.buttonMode = AB_BUTTON_MODES.includes(normalized.messenger.buttonMode) ? normalized.messenger.buttonMode : "both";
   normalized.messages = normalized.messages.map((message, index) => ({
     id: message.id || `m_${index + 1}_${uid().slice(0, 6)}`,
     text: message.text || "",
@@ -2736,6 +2738,9 @@ function renderAutomation(tenant) {
             </div>
             <label class="inline-row"><input data-boolean-path="messenger.embeddedPageEnabled" type="checkbox" ${tenant.messenger.embeddedPageEnabled ? "checked" : ""}> <span>Add embedded-page button</span></label>
             <label class="field"><span>Embedded page URL</span><input data-path="messenger.embeddedPageUrl" value="${escapeAttr(tenant.messenger.embeddedPageUrl || "")}" placeholder="https://example.com"></label>
+            <label class="field"><span>Default buttons to show</span><select data-path="messenger.buttonMode">
+              ${AB_BUTTON_MODES.map((mode) => `<option value="${mode}" ${(tenant.messenger.buttonMode || "both") === mode ? "selected" : ""}>${escapeHtml(abButtonModeLabel(mode))}</option>`).join("")}
+            </select></label>
             <div class="split-row">
               <label class="field"><span>Embedded button text</span><input data-path="messenger.embeddedPageButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}"></label>
               <label class="field"><span>Banner button text</span><input data-path="messenger.embeddedPageBannerButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL)}"></label>
@@ -2895,6 +2900,9 @@ function renderBookingEditor(tenant) {
           ${tenant.messenger.welcomeMediaUrl ? `<button class="btn small" data-clear-media="messenger.welcomeMediaUrl:messenger.welcomeMediaType" type="button">Remove media</button>` : ""}
           <label class="inline-row"><input data-boolean-path="messenger.embeddedPageEnabled" type="checkbox" ${tenant.messenger.embeddedPageEnabled ? "checked" : ""}> <span>Add embedded-page button</span></label>
           <label class="field"><span>Embedded page URL</span><input data-path="messenger.embeddedPageUrl" value="${escapeAttr(tenant.messenger.embeddedPageUrl || "")}" placeholder="https://example.com"></label>
+          <label class="field"><span>Default buttons to show</span><select data-path="messenger.buttonMode">
+            ${AB_BUTTON_MODES.map((mode) => `<option value="${mode}" ${(tenant.messenger.buttonMode || "both") === mode ? "selected" : ""}>${escapeHtml(abButtonModeLabel(mode))}</option>`).join("")}
+          </select></label>
           <div class="split-row">
             <label class="field"><span>Embedded button text</span><input data-path="messenger.embeddedPageButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}"></label>
             <label class="field"><span>Banner button text</span><input data-path="messenger.embeddedPageBannerButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL)}"></label>
@@ -2912,7 +2920,7 @@ function renderBookingEditor(tenant) {
             <span class="mini-label">Messenger preview</span>
             ${renderMessengerMediaPreview(tenant)}
             <p>${escapeHtml(tenant.messenger.welcomeMessage || "Welcome message")}</p>
-            ${renderMessengerButtonsPreview(tenant)}
+            ${renderMessengerButtonsPreview(tenant, tenant.messenger.buttonMode || "both")}
           </div>
           <div class="booking-summary">
             <strong>Answer summary destination</strong>

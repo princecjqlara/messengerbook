@@ -189,6 +189,7 @@ function normalizeTenantAbMessages(tenant) {
   tenant.messenger = {
     ...(tenant.messenger || {}),
     buttonLabel: tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL,
+    buttonMode: AB_BUTTON_MODES.includes(tenant.messenger?.buttonMode) ? tenant.messenger.buttonMode : "both",
     embeddedPageEnabled: Boolean(tenant.messenger?.embeddedPageEnabled),
     embeddedPageUrl: tenant.messenger?.embeddedPageUrl || "",
     embeddedPageButtonLabel: tenant.messenger?.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL,
@@ -718,13 +719,6 @@ function abButtonLabel(message, tenant) {
   return String(message?.buttonLabel || tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL).slice(0, 20);
 }
 
-function canSendInitialInboundCard(contact) {
-  if (!contact || contact.booked) return false;
-  if (Number(contact.first24FollowUpsSent || 0) > 0) return false;
-  if (contact.lastAbMessageSentAt || contact.lastBookingButtonSentAt) return false;
-  return true;
-}
-
 function markFirst24SlotConsumed(contact) {
   contact.first24FollowUpsSent = Math.max(1, Number(contact.first24FollowUpsSent || 0));
 }
@@ -793,7 +787,7 @@ async function sendBookingButtonIfAllowed(tenant, contact, origin) {
     .replaceAll("{{messengerBookingLink}}", url)
     .replaceAll("{{embeddedPageLink}}", embeddedSiteUrlForTenant(tenant, origin, contact));
   const title = String(tenant.messenger.buttonLabel || "Book now").slice(0, 20);
-  const buttons = messengerWebButtons(tenant, origin, contact, title);
+  const buttons = messengerWebButtons(tenant, origin, contact, title, tenant.messenger?.buttonMode || "both");
   const mediaUrl = String(tenant.messenger.welcomeMediaUrl || "").trim();
   const mediaType = String(tenant.messenger.welcomeMediaType || "image").toLowerCase();
   const messengerMediaType = messengerAttachmentType(mediaType);
@@ -898,7 +892,7 @@ async function sendMessengerButtonCard(tenant, contact, origin, text, buttonLabe
   if (!contact?.psid) return { sent: false, reason: "missing contact PSID" };
   if (contact.booked) return { sent: false, reason: "contact already booked" };
   const url = bookingUrlForTenant(tenant, origin, contact);
-  const buttons = messengerWebButtons(tenant, origin, contact, buttonLabel);
+  const buttons = messengerWebButtons(tenant, origin, contact, buttonLabel, tenant.messenger?.buttonMode || "both");
   await graphPost("/me/messages", {
     messaging_type: "RESPONSE",
     recipient: { id: contact.psid },
@@ -1309,10 +1303,6 @@ async function captureWebhookContacts(body, origin) {
     const responseMessageId = recordAbResponseIfNeeded(event.__tenant, event.__contact, event);
     if (responseMessageId) {
       tenantLog(event.__tenant, `Counted A/B response for ${responseMessageId} from ${event.__contact.name}.`);
-    }
-    if (!canSendInitialInboundCard(event.__contact)) {
-      tenantLog(event.__tenant, `Did not send A/B or booking card to ${event.__contact.name}: first card timing already used.`);
-      continue;
     }
     let abSent = false;
     try {
