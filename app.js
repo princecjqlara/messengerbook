@@ -67,6 +67,7 @@ function createBlankTenant(id = `tenant_${uid().slice(0, 8)}`) {
       embeddedPageButtonLabel: DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL,
       embeddedPageBannerMessage: DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE,
       embeddedPageBannerButtonLabel: DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL,
+      embeddedPageBannerPosition: "top",
       postWindowTemplate: "",
       lastBookingSummary: "",
     },
@@ -2738,6 +2739,10 @@ function renderAutomation(tenant) {
             <div class="split-row">
               <label class="field"><span>Embedded button text</span><input data-path="messenger.embeddedPageButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}"></label>
               <label class="field"><span>Banner button text</span><input data-path="messenger.embeddedPageBannerButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL)}"></label>
+              <label class="field"><span>Banner position</span><select data-path="messenger.embeddedPageBannerPosition">
+                <option value="top" ${(tenant.messenger.embeddedPageBannerPosition || "top") === "top" ? "selected" : ""}>Top</option>
+                <option value="bottom" ${tenant.messenger.embeddedPageBannerPosition === "bottom" ? "selected" : ""}>Bottom</option>
+              </select></label>
             </div>
             <label class="field"><span>Embedded page banner</span><textarea data-path="messenger.embeddedPageBannerMessage">${escapeHtml(tenant.messenger.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE)}</textarea></label>
             <div class="booking-summary">
@@ -2893,6 +2898,10 @@ function renderBookingEditor(tenant) {
           <div class="split-row">
             <label class="field"><span>Embedded button text</span><input data-path="messenger.embeddedPageButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}"></label>
             <label class="field"><span>Banner button text</span><input data-path="messenger.embeddedPageBannerButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL)}"></label>
+            <label class="field"><span>Banner position</span><select data-path="messenger.embeddedPageBannerPosition">
+              <option value="top" ${(tenant.messenger.embeddedPageBannerPosition || "top") === "top" ? "selected" : ""}>Top</option>
+              <option value="bottom" ${tenant.messenger.embeddedPageBannerPosition === "bottom" ? "selected" : ""}>Bottom</option>
+            </select></label>
           </div>
           <label class="field"><span>Embedded page banner</span><textarea data-path="messenger.embeddedPageBannerMessage">${escapeHtml(tenant.messenger.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE)}</textarea></label>
           <label class="field"><span>Unique embedded page link</span><input readonly value="${escapeAttr(embeddedSiteUrl(tenant))}"></label>
@@ -3109,8 +3118,9 @@ function renderEmbeddedSitePage(tenant) {
   if (!targetUrl) return renderEmbeddedSiteUnavailable();
   const bannerMessage = tenant.messenger.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE;
   const buttonLabel = tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL;
+  const bannerPosition = tenant.messenger.embeddedPageBannerPosition === "bottom" ? "bottom" : "top";
   return `
-    <div class="embedded-site-page">
+    <div class="embedded-site-page banner-${escapeAttr(bannerPosition)}">
       <header class="embedded-site-banner">
         <div>
           <strong>${escapeHtml(tenant.name || tenant.pageName || "MessengerBook")}</strong>

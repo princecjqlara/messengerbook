@@ -194,6 +194,7 @@ function normalizeTenantAbMessages(tenant) {
     embeddedPageButtonLabel: tenant.messenger?.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL,
     embeddedPageBannerMessage: tenant.messenger?.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE,
     embeddedPageBannerButtonLabel: tenant.messenger?.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL,
+    embeddedPageBannerPosition: tenant.messenger?.embeddedPageBannerPosition === "bottom" ? "bottom" : "top",
   };
   const buttonLabel = tenant.messenger.buttonLabel;
   const existingFields = tenant.booking && Array.isArray(tenant.booking.fields) ? tenant.booking.fields : null;
