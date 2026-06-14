@@ -5,7 +5,12 @@ const META_APP_ID = "2656336981385560";
 const API_BASE = "";
 const DEFAULT_AB_MESSAGE = "Hi {{firstName}}, here is your booking link: {{bookingLink}}";
 const DEFAULT_AB_BUTTON_LABEL = "Book now";
+const DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL = "View page";
+const DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE = "Ready to book? Choose a time with us.";
+const DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL = "Book now";
 const DEFAULT_FIRST24_FIBONACCI_MINUTES = [10, 20, 30];
+const BOOKING_FIELD_TYPES = ["text", "textarea", "email", "phone", "multiple_choice", "media_upload"];
+const BOOKING_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 
 const defaultHero = "assets/booking-hero.png";
 const now = new Date();
@@ -56,6 +61,11 @@ function createBlankTenant(id = `tenant_${uid().slice(0, 8)}`) {
       welcomeMediaType: "",
       autoAbFollowUpEnabled: true,
       suppressAfterUserMessageMinutes: 60,
+      embeddedPageEnabled: false,
+      embeddedPageUrl: "",
+      embeddedPageButtonLabel: DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL,
+      embeddedPageBannerMessage: DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE,
+      embeddedPageBannerButtonLabel: DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL,
       postWindowTemplate: "",
       lastBookingSummary: "",
     },
@@ -250,6 +260,7 @@ function normalizeTenant(tenant) {
   );
   normalized.followUp.first24FibonacciMinutes = normalizeFirst24Intervals(normalized.followUp.first24FibonacciMinutes);
   normalized.pageConnected = Boolean(normalized.pageConnected || normalized.pageAccessToken || normalized.pageId);
+  normalized.contacts = dedupeTenantContacts(normalized);
   normalized.messages = normalized.messages.map((message, index) => ({
     id: message.id || `m_${index + 1}_${uid().slice(0, 6)}`,
     text: message.text || "",
@@ -265,7 +276,7 @@ function normalizeBookingQuestions(questions) {
   return questions.map((question, index) => ({
     id: question.id || `q_${index + 1}_${uid().slice(0, 6)}`,
     label: question.label || `Question ${index + 1}`,
-    type: ["text", "textarea", "email", "phone", "multiple_choice"].includes(question.type) ? question.type : "text",
+    type: BOOKING_FIELD_TYPES.includes(question.type) ? question.type : "text",
     required: Boolean(question.required),
     options: Array.isArray(question.options)
       ? question.options.filter(Boolean)
@@ -296,7 +307,7 @@ function normalizeBookingFields(fields, legacyQuestions = []) {
     id: field.id || `field_${index + 1}_${uid().slice(0, 6)}`,
     key: field.key || `custom_${field.id || index + 1}`,
     label: field.label || `Field ${index + 1}`,
-    type: ["text", "textarea", "email", "phone", "multiple_choice"].includes(field.type) ? field.type : "text",
+    type: BOOKING_FIELD_TYPES.includes(field.type) ? field.type : "text",
     required: Boolean(field.required),
     options: Array.isArray(field.options)
       ? field.options.filter(Boolean)
@@ -458,6 +469,38 @@ function baseAppUrl() {
 
 function messengerBookingUrl(tenant = activeTenant(), contact = null) {
   return bookingUrl(tenant, "messenger_welcome", contact?.psid ? { contact: contact.psid } : {});
+}
+
+function safeExternalUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const url = new URL(withProtocol);
+    return ["http:", "https:"].includes(url.protocol) ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function embeddedPageEnabled(tenant = activeTenant()) {
+  return Boolean(tenant?.messenger?.embeddedPageEnabled && safeExternalUrl(tenant.messenger.embeddedPageUrl));
+}
+
+function embeddedSiteUrl(tenant = activeTenant(), contact = null) {
+  if (!tenant) return baseAppUrl();
+  const params = new URLSearchParams({
+    source: "embedded_page",
+    tenant: tenant.id,
+  });
+  if (contact?.psid) params.set("contact", contact.psid);
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return `${baseAppUrl()}${query}#site/${encodeURIComponent(tenant.booking.slug || tenant.id)}`;
+}
+
+function bookingUrlFromCurrentContact(tenant = activeTenant(), source = "embedded_page_banner") {
+  const contact = bookingContactParam();
+  return bookingUrl(tenant, source, contact ? { contact } : {});
 }
 
 function uid() {
@@ -765,6 +808,7 @@ function interpolate(text, contact, tenant = activeTenant()) {
     .replaceAll("{{name}}", contact.name)
     .replaceAll("{{bookingLink}}", bookingUrl(tenant))
     .replaceAll("{{messengerBookingLink}}", messengerBookingUrl(tenant))
+    .replaceAll("{{embeddedPageLink}}", embeddedSiteUrl(tenant))
     .replaceAll("{{meetingTime}}", meetingAt ? meetingAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "")
     .replaceAll("{{meetingDate}}", meetingAt ? meetingAt.toLocaleDateString([], { month: "long", day: "numeric" }) : "");
 }
@@ -926,6 +970,9 @@ function bookingFieldName(field) {
 function renderBookingFieldControl(field) {
   const name = bookingFieldName(field);
   const required = field.required ? "required data-step-required" : "";
+  if (field.type === "media_upload") {
+    return `<input name="${escapeAttr(name)}" type="file" accept="image/*,video/*" ${required} data-booking-upload-field="${escapeAttr(field.id)}">`;
+  }
   if (field.type === "textarea") {
     return `<textarea name="${escapeAttr(name)}" ${required} placeholder="Type your answer"></textarea>`;
   }
@@ -985,12 +1032,73 @@ function bookingFields(tenant) {
 
 function collectBookingAnswers(data, tenant) {
   return bookingFields(tenant).map((field) => ({
+    ...bookingAnswerFromFormData(data, field),
+  }));
+}
+
+function bookingAnswerFromFormData(data, field) {
+  const value = data.get(bookingFieldName(field));
+  if (field.type === "media_upload") {
+    const file = value instanceof File && value.name ? value : null;
+    return {
+      id: field.id,
+      key: field.key,
+      label: field.label,
+      type: field.type,
+      answer: file ? file.name : "",
+      fileName: file?.name || "",
+      mimeType: file?.type || "",
+      bytes: file?.size || 0,
+    };
+  }
+  return {
     id: field.id,
     key: field.key,
     label: field.label,
     type: field.type,
-    answer: String(data.get(bookingFieldName(field)) || "").trim(),
-  }));
+    answer: String(value || "").trim(),
+  };
+}
+
+async function collectBookingAnswersWithUploads(data, tenant) {
+  const answers = collectBookingAnswers(data, tenant);
+  for (const answer of answers) {
+    if (answer.type !== "media_upload") continue;
+    const file = data.get(bookingFieldName(answer));
+    if (!(file instanceof File) || !file.name) continue;
+    const upload = await uploadBookingMediaFile(file);
+    answer.answer = upload.secureUrl || "";
+    answer.fileName = file.name;
+    answer.mimeType = file.type || "";
+    answer.resourceType = upload.resourceType || "";
+    answer.publicId = upload.publicId || "";
+    answer.bytes = upload.bytes || file.size || 0;
+  }
+  return answers;
+}
+
+async function uploadBookingMediaFile(file) {
+  if (!file.type.startsWith("image/") && !file.type.startsWith("video/")) {
+    throw new Error("Upload an image or video file.");
+  }
+  if (file.size > BOOKING_UPLOAD_MAX_BYTES) {
+    throw new Error("Choose a photo or video under 25 MB.");
+  }
+  showToast("Uploading booking media...");
+  const dataUrl = await fileToDataUrl(file);
+  const payload = await apiRequest("/api/cloudinary/upload", {
+    method: "POST",
+    body: JSON.stringify({ file: dataUrl, fileName: file.name, mimeType: file.type, folder: "booking" }),
+  });
+  return payload.upload || {};
+}
+
+function renderBookingAnswerValue(answer) {
+  if (answer.type === "media_upload" && /^https?:\/\//i.test(String(answer.answer || ""))) {
+    const label = answer.fileName || answer.answer;
+    return `<a href="${escapeAttr(answer.answer)}" target="_blank" rel="noreferrer">${escapeHtml(label)}</a>`;
+  }
+  return `<strong>${escapeHtml(answer.answer)}</strong>`;
 }
 
 function renderBookingLiveSummary(tenant, slot = state.selectedSlot, answers = []) {
@@ -1008,7 +1116,7 @@ function renderBookingLiveSummary(tenant, slot = state.selectedSlot, answers = [
       <div class="summary-answer-list">
         <span class="mini-label">Answers</span>
         ${visibleAnswers.length ? visibleAnswers.map((answer) => `
-          <div class="summary-row"><span>${escapeHtml(answer.label)}</span><strong>${escapeHtml(answer.answer)}</strong></div>
+          <div class="summary-row"><span>${escapeHtml(answer.label)}</span>${renderBookingAnswerValue(answer)}</div>
         `).join("") : `<span class="muted">Answers will appear here as you fill the form.</span>`}
       </div>
     </div>
@@ -1023,6 +1131,17 @@ function bookingSourceLabel() {
   const source = new URLSearchParams(location.search).get("source") || "public_link";
   if (source === "messenger_welcome") return "Messenger welcome button";
   return source.replaceAll("_", " ");
+}
+
+function bookingFieldTypeLabel(type) {
+  return {
+    text: "text",
+    textarea: "long text",
+    email: "email",
+    phone: "phone",
+    multiple_choice: "multiple choice",
+    media_upload: "VSL photo/video upload",
+  }[type] || type.replaceAll("_", " ");
 }
 
 function bookingContactParam() {
@@ -1043,7 +1162,7 @@ function findBookingContact(tenant, data, answers = []) {
 function summarizeBookingRequest(booking, tenant) {
   const answerLines = (booking.answers || [])
     .filter((answer) => answer.answer && !["name", "email", "phone", "note"].includes(answer.key))
-    .map((answer) => `${answer.label}: ${answer.answer}`);
+    .map((answer) => `${answer.label}: ${answer.type === "media_upload" && answer.fileName ? `${answer.fileName} - ${answer.answer}` : answer.answer}`);
   return [
     `New booking request for ${tenant.name}`,
     `Name: ${booking.contactName}`,
@@ -1059,6 +1178,7 @@ function summarizeBookingRequest(booking, tenant) {
 function routeFromHash() {
   const hash = location.hash.replace("#", "");
   if (hash.startsWith("booking/")) return { mode: "booking", slug: hash.split("/")[1] };
+  if (hash.startsWith("site/")) return { mode: "site", slug: hash.split("/")[1] };
   return { mode: "admin" };
 }
 
@@ -1356,6 +1476,84 @@ function contactMatchKey(contact) {
   return `name:${String(contact.name || "").trim().toLowerCase()}`;
 }
 
+function contactIdentityKeys(contact) {
+  const name = String(contact.name || "").trim().toLowerCase();
+  const email = String(contact.email || "").trim().toLowerCase();
+  const phone = String(contact.phone || "").replace(/\D+/g, "");
+  return [
+    contact.psid ? `psid:${contact.psid}` : "",
+    contact.conversationId ? `conversation:${contact.conversationId}` : "",
+    email ? `email:${email}` : "",
+    phone ? `phone:${phone}` : "",
+    name ? `name:${name}` : "",
+    name && (email || phone) ? `profile:${name}:${email}:${phone}` : "",
+    contact.id ? `id:${contact.id}` : "",
+  ].filter(Boolean);
+}
+
+function earlierDate(a, b) {
+  const first = new Date(a || 0);
+  const second = new Date(b || 0);
+  if (!Number.isFinite(first.getTime())) return b || a || "";
+  if (!Number.isFinite(second.getTime())) return a || b || "";
+  return first <= second ? a : b;
+}
+
+function laterDate(a, b) {
+  const first = new Date(a || 0);
+  const second = new Date(b || 0);
+  if (!Number.isFinite(first.getTime())) return b || a || "";
+  if (!Number.isFinite(second.getTime())) return a || b || "";
+  return first >= second ? a : b;
+}
+
+function mergeContactRecord(existing, incoming) {
+  existing.name = existing.name || incoming.name || "";
+  existing.email = existing.email || incoming.email || "";
+  existing.phone = existing.phone || incoming.phone || "";
+  existing.psid = existing.psid || incoming.psid || "";
+  existing.conversationId = existing.conversationId || incoming.conversationId || "";
+  existing.source = existing.source || incoming.source || "Messenger";
+  existing.status = existing.booked ? existing.status : existing.status || incoming.status || "new";
+  existing.createdAt = earlierDate(existing.createdAt, incoming.createdAt);
+  existing.lastMessageAt = laterDate(existing.lastMessageAt, incoming.lastMessageAt);
+  existing.lastInboundMessageAt = laterDate(existing.lastInboundMessageAt, incoming.lastInboundMessageAt);
+  existing.lastUserMessageAt = laterDate(existing.lastUserMessageAt, incoming.lastUserMessageAt);
+  existing.lastMessageText = existing.lastMessageText || incoming.lastMessageText || "";
+  existing.lastMessageDirection = existing.lastMessageDirection || incoming.lastMessageDirection || "";
+  existing.profilePic = existing.profilePic || incoming.profilePic || "";
+  existing.booked = Boolean(existing.booked || incoming.booked);
+  existing.bookedDone = Boolean(existing.bookedDone || incoming.bookedDone);
+  existing.bookingId = existing.bookingId || incoming.bookingId || "";
+  existing.bookingSlot = existing.bookingSlot || incoming.bookingSlot || "";
+  existing.bookingSummary = existing.bookingSummary || incoming.bookingSummary || "";
+  existing.bookingAnswers = existing.bookingAnswers || incoming.bookingAnswers || [];
+  existing.notes = existing.notes || incoming.notes || "";
+  existing.followUpsSent = Math.max(Number(existing.followUpsSent || 0), Number(incoming.followUpsSent || 0));
+  existing.first24FollowUpsSent = Math.max(Number(existing.first24FollowUpsSent || 0), Number(incoming.first24FollowUpsSent || 0));
+  existing.engagement = mergeEngagement(existing.engagement || [], incoming.engagement || []);
+  return existing;
+}
+
+function dedupeTenantContacts(tenant) {
+  const contacts = Array.isArray(tenant?.contacts) ? tenant.contacts : [];
+  const indexes = new Map();
+  const deduped = [];
+  contacts.forEach((contact) => {
+    const keys = contactIdentityKeys(contact);
+    const existingIndex = keys.map((key) => indexes.get(key)).find((index) => index !== undefined);
+    if (existingIndex === undefined) {
+      deduped.push(contact);
+      keys.forEach((key) => indexes.set(key, deduped.length - 1));
+      return;
+    }
+    const existing = deduped[existingIndex];
+    mergeContactRecord(existing, contact);
+    contactIdentityKeys(existing).forEach((key) => indexes.set(key, existingIndex));
+  });
+  return deduped;
+}
+
 function mergeEngagement(existing = [], incoming = []) {
   const byKey = new Map();
   [...existing, ...incoming].forEach((event) => {
@@ -1419,6 +1617,7 @@ function mergeImportedContacts(tenant, importedContacts = []) {
     updated += 1;
   });
 
+  tenant.contacts = dedupeTenantContacts(tenant);
   return { added, updated };
 }
 
@@ -1591,6 +1790,7 @@ function updateContactField(contactId, field, value) {
     }
   }
   addLog(`Updated ${contact.name || "contact"} contact info.`);
+  tenant.contacts = dedupeTenantContacts(tenant);
   saveState();
 }
 
@@ -1616,6 +1816,7 @@ function updateContactPipeline(contactId, stage) {
     contact.status = stage === "high_intent" ? "hot" : stage === "new" ? "new" : "nurture";
   }
   addLog(`Moved ${contact.name || "contact"} to ${pipelineLabel(stage)}.`);
+  tenant.contacts = dedupeTenantContacts(tenant);
   saveState();
   render();
 }
@@ -1909,7 +2110,13 @@ async function bookSlot(event, tenantId) {
     showToast("Choose a booking time first.");
     return;
   }
-  const answers = collectBookingAnswers(data, tenant);
+  let answers = [];
+  try {
+    answers = await collectBookingAnswersWithUploads(data, tenant);
+  } catch (error) {
+    showToast(error.message || "Booking media upload failed.");
+    return;
+  }
   const contactName = bookingAnswerByKey(answers, "name") || bookingAnswerByKey(answers, "email") || bookingAnswerByKey(answers, "phone") || "Booking visitor";
   const contactEmail = bookingAnswerByKey(answers, "email");
   const contactPhone = bookingAnswerByKey(answers, "phone");
@@ -2048,6 +2255,14 @@ function render() {
     trackBookingOpen(tenant);
     return;
   }
+  if (route.mode === "site") {
+    const tenantId = new URLSearchParams(location.search).get("tenant");
+    const tenant = state.tenants.find((item) => item.id === tenantId) ||
+      state.tenants.find((item) => item.booking.slug === route.slug) ||
+      (!tenantId ? activeTenant() : null);
+    app.innerHTML = tenant ? renderEmbeddedSitePage(tenant) : renderEmbeddedSiteUnavailable();
+    return;
+  }
   if (!currentUser()) {
     app.innerHTML = renderLogin();
     wireLogin();
@@ -2072,7 +2287,6 @@ function renderLogin() {
           <label class="field"><span>Email</span><input name="email" type="email" required autocomplete="username"></label>
           <label class="field"><span>Password</span><input name="password" type="password" required autocomplete="current-password"></label>
           <button class="btn primary" type="submit">Sign in</button>
-          <button class="btn" type="button" id="repairState">Repair local state</button>
           <div class="login-demo">
             <strong>Accounts</strong>
             <span>Head admin account is configured by the app environment.</span>
@@ -2378,9 +2592,8 @@ function renderContacts(tenant) {
 
 function renderContactsPipeline(tenant) {
   const average = averageInboundMessages(tenant);
-  const stages = ["all", "booked", "booked_done", "high_intent", "new", "nurture"];
+  const stages = ["booked", "booked_done", "high_intent", "new", "nurture"];
   const grouped = stages.reduce((map, stage) => ({ ...map, [stage]: [] }), {});
-  grouped.all = [...tenant.contacts];
   tenant.contacts.forEach((contact) => {
     const stage = contactPipelineStage(contact, tenant);
     if (!grouped[stage]) grouped[stage] = [];
@@ -2389,7 +2602,7 @@ function renderContactsPipeline(tenant) {
 
   return `
     <section class="section-head">
-      <div><h1>Contacts</h1><p>Pipeline columns: All contacts, Booked, Booked Done, High Intent, New Contact, and Nurture. High intent means inbound messages are above the page average (${average.toFixed(1)}).</p></div>
+      <div><h1>Contacts</h1><p>Pipeline columns: Booked, Booked Done, High Intent, New Contact, and Nurture. The table below remains the all-contacts view. High intent means inbound messages are above the page average (${average.toFixed(1)}).</p></div>
       <div class="inline-row">
         ${isHeadAdmin() ? `<button class="btn" id="syncOld">Import available page contacts</button>` : ""}
         <button class="btn" id="refreshContacts">Refresh contacts</button>
@@ -2399,9 +2612,9 @@ function renderContactsPipeline(tenant) {
     ${tenant.contacts.length ? `
       <div class="pipeline-board">
         ${stages.map((stage) => `
-          <div class="pipeline-column ${stage === "all" ? "readonly" : ""}" data-pipeline-drop="${escapeAttr(stage)}">
+          <div class="pipeline-column" data-pipeline-drop="${escapeAttr(stage)}">
             <div class="pipeline-head">
-              <div><strong>${pipelineLabel(stage)}</strong><span>${stage === "all" ? "Every contact" : "Drop here to update"}</span></div>
+              <div><strong>${pipelineLabel(stage)}</strong><span>Drop here to update</span></div>
               <span class="status-pill info">${grouped[stage].length}</span>
             </div>
             <div class="pipeline-card-list">
@@ -2521,11 +2734,19 @@ function renderAutomation(tenant) {
             <label class="field"><span>Photo/media</span><input data-cloudinary-upload="messenger.welcomeMediaUrl" data-cloudinary-type-path="messenger.welcomeMediaType" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx"></label>
             <label class="field"><span>Uploaded media URL (optional)</span><input data-path="messenger.welcomeMediaUrl" value="${escapeAttr(tenant.messenger.welcomeMediaUrl || "")}" placeholder="Optional media URL"></label>
             ${tenant.messenger.welcomeMediaUrl ? `<button class="btn small" data-clear-media="messenger.welcomeMediaUrl:messenger.welcomeMediaType" type="button">Remove media</button>` : ""}
+            <label class="inline-row"><input data-boolean-path="messenger.embeddedPageEnabled" type="checkbox" ${tenant.messenger.embeddedPageEnabled ? "checked" : ""}> <span>Add embedded-page button</span></label>
+            <label class="field"><span>Embedded page URL</span><input data-path="messenger.embeddedPageUrl" value="${escapeAttr(tenant.messenger.embeddedPageUrl || "")}" placeholder="https://example.com"></label>
+            <div class="split-row">
+              <label class="field"><span>Embedded button text</span><input data-path="messenger.embeddedPageButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}"></label>
+              <label class="field"><span>Banner button text</span><input data-path="messenger.embeddedPageBannerButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL)}"></label>
+            </div>
+            <label class="field"><span>Embedded page banner</span><textarea data-path="messenger.embeddedPageBannerMessage">${escapeHtml(tenant.messenger.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE)}</textarea></label>
             <label class="field"><span>Do not send after team message, minutes</span><input data-number-path="messenger.suppressAfterUserMessageMinutes" type="number" min="0" step="1" value="${Number(tenant.messenger.suppressAfterUserMessageMinutes ?? 60)}"></label>
             <div class="booking-summary">
               <strong>${escapeHtml(tenant.messenger.buttonLabel)}</strong>
               ${tenant.messenger.welcomeMediaUrl ? `<span>${escapeHtml(tenant.messenger.welcomeMediaUrl)}</span>` : ""}
               <span>${escapeHtml(messengerBookingUrl(tenant))}</span>
+              ${embeddedPageEnabled(tenant) ? `<span>${escapeHtml(embeddedSiteUrl(tenant))}</span>` : ""}
             </div>
           </div>
         </div>
@@ -2557,8 +2778,9 @@ function renderAutomation(tenant) {
               <span class="mini-label">Messenger button card</span>
               <textarea data-message="${message.id}" aria-label="A/B card body">${escapeHtml(abMessageText(message, tenant))}</textarea>
               <label class="field compact-field"><span>Button text</span><input data-message-button="${message.id}" value="${escapeAttr(message.buttonLabel || tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL)}" maxlength="20"></label>
-              <button class="btn small primary" type="button">${escapeHtml(message.buttonLabel || tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL)}</button>
+              ${renderMessengerButtonsPreview({ ...tenant, messenger: { ...tenant.messenger, buttonLabel: message.buttonLabel || tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL } })}
               <span class="muted">${escapeHtml(messengerBookingUrl(tenant))}</span>
+              ${embeddedPageEnabled(tenant) ? `<span class="muted">${escapeHtml(embeddedSiteUrl(tenant))}</span>` : ""}
             </div>
             <div class="inline-row">
               <span class="muted">${message.responses}/${message.sent} responses</span>
@@ -2631,13 +2853,22 @@ function renderBookingEditor(tenant) {
           <label class="field"><span>Upload welcome media</span><input data-cloudinary-upload="messenger.welcomeMediaUrl" data-cloudinary-type-path="messenger.welcomeMediaType" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx"></label>
           <label class="field"><span>Welcome media URL (optional)</span><input data-path="messenger.welcomeMediaUrl" value="${escapeAttr(tenant.messenger.welcomeMediaUrl || "")}" placeholder="Optional media URL"></label>
           ${tenant.messenger.welcomeMediaUrl ? `<button class="btn small" data-clear-media="messenger.welcomeMediaUrl:messenger.welcomeMediaType" type="button">Remove media</button>` : ""}
+          <label class="inline-row"><input data-boolean-path="messenger.embeddedPageEnabled" type="checkbox" ${tenant.messenger.embeddedPageEnabled ? "checked" : ""}> <span>Add embedded-page button</span></label>
+          <label class="field"><span>Embedded page URL</span><input data-path="messenger.embeddedPageUrl" value="${escapeAttr(tenant.messenger.embeddedPageUrl || "")}" placeholder="https://example.com"></label>
+          <div class="split-row">
+            <label class="field"><span>Embedded button text</span><input data-path="messenger.embeddedPageButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}"></label>
+            <label class="field"><span>Banner button text</span><input data-path="messenger.embeddedPageBannerButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL)}"></label>
+          </div>
+          <label class="field"><span>Embedded page banner</span><textarea data-path="messenger.embeddedPageBannerMessage">${escapeHtml(tenant.messenger.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE)}</textarea></label>
+          <label class="field"><span>Unique embedded page link</span><input readonly value="${escapeAttr(embeddedSiteUrl(tenant))}"></label>
+          <button class="btn" id="copyEmbeddedPageLink">Copy embedded page link</button>
           <label class="field"><span>Unique Messenger booking link</span><input readonly value="${escapeAttr(messengerBookingUrl(tenant))}"></label>
           <button class="btn" id="copyMessengerLink">Copy Messenger button link</button>
           <div class="messenger-preview">
             <span class="mini-label">Messenger preview</span>
             ${renderMessengerMediaPreview(tenant)}
             <p>${escapeHtml(tenant.messenger.welcomeMessage || "Welcome message")}</p>
-            <button class="btn small primary" type="button">${escapeHtml(tenant.messenger.buttonLabel || "Book now")}</button>
+            ${renderMessengerButtonsPreview(tenant)}
           </div>
           <div class="booking-summary">
             <strong>Answer summary destination</strong>
@@ -2660,11 +2891,11 @@ function renderBookingEditor(tenant) {
               <label class="field"><span>Field label</span><input data-question-field="${escapeAttr(question.id)}:label" value="${escapeAttr(question.label)}"></label>
               <div class="question-row">
                 <label class="field"><span>Type</span><select data-question-field="${escapeAttr(question.id)}:type">
-                  ${["text", "textarea", "email", "phone", "multiple_choice"].map((type) => `<option value="${type}" ${question.type === type ? "selected" : ""}>${escapeHtml(type.replaceAll("_", " "))}</option>`).join("")}
+                  ${BOOKING_FIELD_TYPES.map((type) => `<option value="${type}" ${question.type === type ? "selected" : ""}>${escapeHtml(bookingFieldTypeLabel(type))}</option>`).join("")}
                 </select></label>
                 <label class="inline-row"><input data-question-required="${escapeAttr(question.id)}" type="checkbox" ${question.required ? "checked" : ""}> <span>Required</span></label>
               </div>
-              <label class="field"><span>Multiple choice options</span><input data-question-field="${escapeAttr(question.id)}:options" value="${escapeAttr((question.options || []).join(", "))}" placeholder="Option A, Option B, Option C"></label>
+              ${question.type === "multiple_choice" ? `<label class="field"><span>Multiple choice options</span><input data-question-field="${escapeAttr(question.id)}:options" value="${escapeAttr((question.options || []).join(", "))}" placeholder="Option A, Option B, Option C"></label>` : ""}
             </div>
           `).join("") || `<div class="empty">No form fields. Add a field if you want customers to answer anything before booking.</div>`}
         </div>
@@ -2838,6 +3069,46 @@ function metric(label, value, note) {
   return `<div class="panel metric"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(value))}</strong><small>${escapeHtml(note)}</small></div>`;
 }
 
+function renderEmbeddedSitePage(tenant) {
+  const targetUrl = safeExternalUrl(tenant?.messenger?.embeddedPageUrl);
+  if (!targetUrl) return renderEmbeddedSiteUnavailable();
+  const bannerMessage = tenant.messenger.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE;
+  const buttonLabel = tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL;
+  return `
+    <div class="embedded-site-page">
+      <header class="embedded-site-banner">
+        <div>
+          <strong>${escapeHtml(tenant.name || tenant.pageName || "MessengerBook")}</strong>
+          <span>${escapeHtml(bannerMessage)}</span>
+        </div>
+        <a class="btn primary" href="${escapeAttr(bookingUrlFromCurrentContact(tenant))}">${escapeHtml(buttonLabel)}</a>
+      </header>
+      <iframe class="embedded-site-frame" src="${escapeAttr(targetUrl)}" title="${escapeAttr(tenant.name || "Embedded page")}" referrerpolicy="no-referrer-when-downgrade"></iframe>
+    </div>
+  `;
+}
+
+function renderEmbeddedSiteUnavailable() {
+  return `
+    <div class="embedded-site-page unavailable">
+      <section class="embedded-site-empty">
+        <span class="status-pill">Unavailable</span>
+        <h1>Embedded page not available</h1>
+        <p>This link is not configured yet. Please contact the business for a fresh link.</p>
+      </section>
+    </div>
+  `;
+}
+
+function renderMessengerButtonsPreview(tenant) {
+  return `
+    <div class="messenger-button-row">
+      ${embeddedPageEnabled(tenant) ? `<button class="btn small" type="button">${escapeHtml(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}</button>` : ""}
+      <button class="btn small primary" type="button">${escapeHtml(tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL)}</button>
+    </div>
+  `;
+}
+
 function renderBookingPage(tenant, embedded = false) {
   const slots = generateSlots(tenant);
   const slotsByDay = groupSlotsByDay(slots);
@@ -2992,6 +3263,7 @@ function wireAdmin() {
   document.getElementById("copyLink")?.addEventListener("click", copyBookingLink);
   document.getElementById("copyLinkEditor")?.addEventListener("click", copyBookingLink);
   document.getElementById("copyMessengerLink")?.addEventListener("click", copyMessengerBookingLink);
+  document.getElementById("copyEmbeddedPageLink")?.addEventListener("click", copyEmbeddedPageLink);
   document.querySelectorAll("[data-send]").forEach((button) => button.addEventListener("click", () => sendFollowUp(button.dataset.send)));
   document.querySelectorAll("[data-delete-contact]").forEach((button) => button.addEventListener("click", () => deleteContact(button.dataset.deleteContact)));
   document.querySelectorAll("[data-contact-field]").forEach((field) => field.addEventListener("change", () => {
@@ -3093,7 +3365,6 @@ function wireAdmin() {
 
 function wireLogin() {
   document.getElementById("loginForm")?.addEventListener("submit", signIn);
-  document.getElementById("repairState")?.addEventListener("click", repairLocalState);
 }
 
 function shiftBookingCalendarMonth(direction, tenant = activeTenant()) {
@@ -3201,6 +3472,16 @@ function copyMessengerBookingLink() {
   }
   navigator.clipboard?.writeText(messengerBookingUrl(activeTenant()));
   showToast("Messenger booking button link copied.");
+}
+
+function copyEmbeddedPageLink() {
+  const tenant = activeTenant();
+  if (!tenant || !embeddedPageEnabled(tenant)) {
+    showToast("Add an embedded page URL before copying the link.");
+    return;
+  }
+  navigator.clipboard?.writeText(embeddedSiteUrl(tenant));
+  showToast("Embedded page link copied.");
 }
 
 function escapeHtml(value) {

@@ -23,7 +23,12 @@ const PUBLIC_ORIGIN = (process.env.BOOKING_BASE_URL || process.env.APP_URL || `h
 const DEFAULT_AB_MESSAGE = "Hi {{firstName}}, here is your booking link: {{bookingLink}}";
 const DEFAULT_AB_BUTTON_LABEL = "Book now";
 const DEFAULT_BOOKING_ABANDONED_MESSAGE = "Hi {{firstName}}, you can still finish booking your appointment here.";
+const DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL = "View page";
+const DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE = "Ready to book? Choose a time with us.";
+const DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL = "Book now";
 const DEFAULT_FIRST24_FIBONACCI_MINUTES = [10, 20, 30];
+const BOOKING_ABANDONED_SEND_LOCK_MINUTES = 15;
+const BOOKING_FIELD_TYPES = ["text", "textarea", "email", "phone", "multiple_choice", "media_upload"];
 const bookingOpenTimers = new Map();
 let automaticFollowUpScanRunning = false;
 let scheduledTasksRunning = false;
@@ -180,7 +185,16 @@ async function fetchTenants() {
 
 function normalizeTenantAbMessages(tenant) {
   if (!tenant) return tenant;
-  const buttonLabel = tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL;
+  tenant.messenger = {
+    ...(tenant.messenger || {}),
+    buttonLabel: tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL,
+    embeddedPageEnabled: Boolean(tenant.messenger?.embeddedPageEnabled),
+    embeddedPageUrl: tenant.messenger?.embeddedPageUrl || "",
+    embeddedPageButtonLabel: tenant.messenger?.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL,
+    embeddedPageBannerMessage: tenant.messenger?.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE,
+    embeddedPageBannerButtonLabel: tenant.messenger?.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL,
+  };
+  const buttonLabel = tenant.messenger.buttonLabel;
   const existingFields = tenant.booking && Array.isArray(tenant.booking.fields) ? tenant.booking.fields : null;
   const legacyQuestions = normalizeBookingQuestions(tenant.booking?.questions || []);
   tenant.followUp = {
@@ -198,6 +212,7 @@ function normalizeTenantAbMessages(tenant) {
     deliveryFileType: tenant.booking?.deliveryFileType || "",
     fields: normalizeBookingFields(existingFields, legacyQuestions),
   };
+  tenant.contacts = dedupeTenantContacts(tenant.contacts || []);
   tenant.messages = Array.isArray(tenant.messages) ? tenant.messages.map((message, index) => ({
     ...message,
     id: message.id || `m_${index + 1}_${Math.random().toString(36).slice(2, 8)}`,
@@ -223,7 +238,7 @@ function normalizeBookingQuestions(questions) {
   return questions.map((question, index) => ({
     id: question.id || `q_${index + 1}_${Math.random().toString(36).slice(2, 8)}`,
     label: question.label || `Question ${index + 1}`,
-    type: ["text", "textarea", "email", "phone", "multiple_choice"].includes(question.type) ? question.type : "text",
+    type: BOOKING_FIELD_TYPES.includes(question.type) ? question.type : "text",
     required: Boolean(question.required),
     options: Array.isArray(question.options)
       ? question.options.filter(Boolean)
@@ -242,7 +257,7 @@ function normalizeBookingFields(fields, legacyQuestions = []) {
     id: field.id || `field_${index + 1}_${Math.random().toString(36).slice(2, 8)}`,
     key: field.key || `custom_${field.id || index + 1}`,
     label: field.label || `Field ${index + 1}`,
-    type: ["text", "textarea", "email", "phone", "multiple_choice"].includes(field.type) ? field.type : "text",
+    type: BOOKING_FIELD_TYPES.includes(field.type) ? field.type : "text",
     required: Boolean(field.required),
     options: Array.isArray(field.options)
       ? field.options.filter(Boolean)
@@ -357,6 +372,96 @@ function countInboundMessages(contact) {
   return (contact.engagement || []).filter((event) => event.type === "reply").length;
 }
 
+function contactIdentityKeys(contact = {}) {
+  const name = String(contact.name || "").trim().toLowerCase();
+  const email = String(contact.email || "").trim().toLowerCase();
+  const phone = String(contact.phone || "").replace(/\D+/g, "");
+  return [
+    contact.psid ? `psid:${contact.psid}` : "",
+    contact.conversationId ? `conversation:${contact.conversationId}` : "",
+    email ? `email:${email}` : "",
+    phone ? `phone:${phone}` : "",
+    name ? `name:${name}` : "",
+    contact.id ? `id:${contact.id}` : "",
+  ].filter(Boolean);
+}
+
+function mergeContactEngagement(existing = [], incoming = []) {
+  const byKey = new Map();
+  [...existing, ...incoming].forEach((event) => {
+    if (!event?.at) return;
+    byKey.set(`${event.id || ""}:${event.at}:${event.type || ""}`, { ...event });
+  });
+  return [...byKey.values()].sort((a, b) => new Date(a.at) - new Date(b.at));
+}
+
+function earlierDate(a, b) {
+  const first = new Date(a || 0);
+  const second = new Date(b || 0);
+  if (!Number.isFinite(first.getTime())) return b || a || "";
+  if (!Number.isFinite(second.getTime())) return a || b || "";
+  return first <= second ? a : b;
+}
+
+function laterDate(a, b) {
+  const first = new Date(a || 0);
+  const second = new Date(b || 0);
+  if (!Number.isFinite(first.getTime())) return b || a || "";
+  if (!Number.isFinite(second.getTime())) return a || b || "";
+  return first >= second ? a : b;
+}
+
+function mergeContactRecord(existing, incoming) {
+  existing.name = existing.name || incoming.name || "";
+  existing.email = existing.email || incoming.email || "";
+  existing.phone = existing.phone || incoming.phone || "";
+  existing.psid = existing.psid || incoming.psid || "";
+  existing.conversationId = existing.conversationId || incoming.conversationId || "";
+  existing.source = existing.source || incoming.source || "Messenger";
+  existing.status = existing.booked ? existing.status : existing.status || incoming.status || "new";
+  existing.createdAt = earlierDate(existing.createdAt, incoming.createdAt);
+  existing.lastMessageAt = laterDate(existing.lastMessageAt, incoming.lastMessageAt);
+  existing.lastInboundMessageAt = laterDate(existing.lastInboundMessageAt, incoming.lastInboundMessageAt);
+  existing.lastUserMessageAt = laterDate(existing.lastUserMessageAt, incoming.lastUserMessageAt);
+  existing.lastMessageText = existing.lastMessageText || incoming.lastMessageText || "";
+  existing.lastMessageDirection = existing.lastMessageDirection || incoming.lastMessageDirection || "";
+  existing.profilePic = existing.profilePic || incoming.profilePic || "";
+  existing.booked = Boolean(existing.booked || incoming.booked);
+  existing.bookedDone = Boolean(existing.bookedDone || incoming.bookedDone);
+  existing.bookingId = existing.bookingId || incoming.bookingId || "";
+  existing.bookingSlot = existing.bookingSlot || incoming.bookingSlot || "";
+  existing.bookingSummary = existing.bookingSummary || incoming.bookingSummary || "";
+  existing.bookingAnswers = existing.bookingAnswers || incoming.bookingAnswers || [];
+  existing.notes = existing.notes || incoming.notes || "";
+  existing.followUpsSent = Math.max(Number(existing.followUpsSent || 0), Number(incoming.followUpsSent || 0));
+  existing.first24FollowUpsSent = Math.max(Number(existing.first24FollowUpsSent || 0), Number(incoming.first24FollowUpsSent || 0));
+  existing.engagement = mergeContactEngagement(existing.engagement || [], incoming.engagement || []);
+  const best = calculateBestContactTime(existing);
+  existing.bestContactHour = best.hour;
+  existing.bestContactMinute = best.minute;
+  existing.bestContactMinutes = best.minutes;
+  existing.inboundMessageCount = countInboundMessages(existing);
+  return existing;
+}
+
+function dedupeTenantContacts(contacts = []) {
+  const indexes = new Map();
+  const deduped = [];
+  contacts.forEach((contact) => {
+    const keys = contactIdentityKeys(contact);
+    const existingIndex = keys.map((key) => indexes.get(key)).find((index) => index !== undefined);
+    if (existingIndex === undefined) {
+      deduped.push(contact);
+      keys.forEach((key) => indexes.set(key, deduped.length - 1));
+      return;
+    }
+    const existing = deduped[existingIndex];
+    mergeContactRecord(existing, contact);
+    contactIdentityKeys(existing).forEach((key) => indexes.set(key, existingIndex));
+  });
+  return deduped;
+}
+
 function isGenericMessengerName(name = "") {
   return /^Messenger Contact \d+$/i.test(String(name || "").trim()) || String(name || "").trim() === "Messenger Contact";
 }
@@ -452,11 +557,92 @@ function bookingUrlForTenant(tenant, origin, contact = null) {
   return `${origin}/index.html?${params.toString()}#booking/${encodeURIComponent(slug)}`;
 }
 
+function safeExternalUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const url = new URL(withProtocol);
+    return ["http:", "https:"].includes(url.protocol) ? url.toString() : "";
+  } catch {
+    return "";
+  }
+}
+
+function embeddedSiteUrlForTenant(tenant, origin, contact = null) {
+  const slug = tenant.booking?.slug || tenant.id || "site";
+  const params = new URLSearchParams({
+    source: "embedded_page",
+    tenant: tenant.id,
+  });
+  if (contact?.psid) params.set("contact", contact.psid);
+  return `${origin}/index.html?${params.toString()}#site/${encodeURIComponent(slug)}`;
+}
+
+function messengerWebButtons(tenant, origin, contact, bookingTitle = DEFAULT_AB_BUTTON_LABEL) {
+  const buttons = [];
+  if (tenant.messenger?.embeddedPageEnabled && safeExternalUrl(tenant.messenger.embeddedPageUrl)) {
+    buttons.push({
+      type: "web_url",
+      url: embeddedSiteUrlForTenant(tenant, origin, contact),
+      title: String(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL).slice(0, 20),
+    });
+  }
+  buttons.push({
+    type: "web_url",
+    url: bookingUrlForTenant(tenant, origin, contact),
+    title: String(bookingTitle || tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL).slice(0, 20),
+  });
+  return buttons.slice(0, 3);
+}
+
 function minutesSince(value) {
   if (!value) return Infinity;
   const time = new Date(value).getTime();
   if (!Number.isFinite(time)) return Infinity;
   return (Date.now() - time) / 60000;
+}
+
+function abandonedFollowUpDelayMinutes(tenant) {
+  return Math.max(1, Number(tenant.followUp?.bookingAbandonedDelayMinutes || 5));
+}
+
+function abandonedFollowUpDueAt(openedAt, tenant) {
+  const openedTime = new Date(openedAt || 0).getTime();
+  if (!Number.isFinite(openedTime)) return null;
+  return new Date(openedTime + abandonedFollowUpDelayMinutes(tenant) * 60000);
+}
+
+function isAbandonedFollowUpSending(contact) {
+  return contact?.bookingAbandonedFollowUpStatus === "sending" &&
+    minutesSince(contact.bookingAbandonedFollowUpStartedAt) < BOOKING_ABANDONED_SEND_LOCK_MINUTES;
+}
+
+function hasPendingAbandonedFollowUp(contact) {
+  return contact?.bookingAbandonedFollowUpStatus === "scheduled" &&
+    !contact.bookingAbandonedFollowUpSent &&
+    Boolean(contact.bookingAbandonedFollowUpDueAt);
+}
+
+function markAbandonedFollowUpScheduled(contact, tenant, source, at = new Date().toISOString()) {
+  const dueAt = abandonedFollowUpDueAt(at, tenant);
+  contact.lastBookingOpenedAt = at;
+  contact.lastBookingOpenedSource = source || "booking_page";
+  contact.bookingAbandonedFollowUpStatus = "scheduled";
+  contact.bookingAbandonedFollowUpScheduledAt = at;
+  contact.bookingAbandonedFollowUpDueAt = dueAt ? dueAt.toISOString() : "";
+  contact.bookingAbandonedFollowUpStartedAt = "";
+  contact.bookingAbandonedFollowUpError = "";
+  return dueAt;
+}
+
+function markAbandonedFollowUpSending(contact) {
+  const at = new Date().toISOString();
+  contact.bookingAbandonedFollowUpStatus = "sending";
+  contact.bookingAbandonedFollowUpStartedAt = at;
+  contact.bookingAbandonedFollowUpClaimId = `booking_abandoned_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  contact.bookingAbandonedFollowUpError = "";
+  return contact.bookingAbandonedFollowUpClaimId;
 }
 
 function shouldSuppressBookingButton(contact, tenant) {
@@ -475,19 +661,21 @@ function messengerAttachmentType(type = "") {
 
 function interpolateMessage(text, contact, tenant, origin) {
   const url = bookingUrlForTenant(tenant, origin, contact);
+  const embeddedUrl = embeddedSiteUrlForTenant(tenant, origin, contact);
   const rawName = String(contact.name || "").trim();
   const displayName = rawName && !isGenericMessengerName(rawName) ? rawName : "there";
   return String(text || "")
     .replaceAll("{{firstName}}", displayName.split(" ")[0] || "there")
     .replaceAll("{{name}}", displayName)
     .replaceAll("{{bookingLink}}", url)
-    .replaceAll("{{messengerBookingLink}}", url);
+    .replaceAll("{{messengerBookingLink}}", url)
+    .replaceAll("{{embeddedPageLink}}", embeddedUrl);
 }
 
 function cleanButtonCardText(text) {
   return String(text || "")
     .replace(/https?:\/\/\S+/g, "")
-    .replace(/\{\{(?:bookingLink|messengerBookingLink)\}\}/g, "")
+    .replace(/\{\{(?:bookingLink|messengerBookingLink|embeddedPageLink)\}\}/g, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/[ \t]{2,}/g, " ")
@@ -527,6 +715,7 @@ async function sendAbFollowUpIfAvailable(tenant, contact, origin) {
   const url = bookingUrlForTenant(tenant, origin, contact);
   const text = interpolateMessage(abMessageText(message, tenant), contact, tenant, origin).slice(0, 640);
   const title = abButtonLabel(message, tenant);
+  const buttons = messengerWebButtons(tenant, origin, contact, title);
   await graphPost("/me/messages", {
     messaging_type: "RESPONSE",
     recipient: { id: contact.psid },
@@ -536,7 +725,7 @@ async function sendAbFollowUpIfAvailable(tenant, contact, origin) {
         payload: {
           template_type: "button",
           text,
-          buttons: [{ type: "web_url", url, title }],
+          buttons,
         },
       },
     },
@@ -577,8 +766,10 @@ async function sendBookingButtonIfAllowed(tenant, contact, origin) {
     .replaceAll("{{firstName}}", String(contact.name || "there").split(" ")[0] || "there")
     .replaceAll("{{name}}", contact.name || "there")
     .replaceAll("{{bookingLink}}", url)
-    .replaceAll("{{messengerBookingLink}}", url);
+    .replaceAll("{{messengerBookingLink}}", url)
+    .replaceAll("{{embeddedPageLink}}", embeddedSiteUrlForTenant(tenant, origin, contact));
   const title = String(tenant.messenger.buttonLabel || "Book now").slice(0, 20);
+  const buttons = messengerWebButtons(tenant, origin, contact, title);
   const mediaUrl = String(tenant.messenger.welcomeMediaUrl || "").trim();
   const mediaType = String(tenant.messenger.welcomeMediaType || "image").toLowerCase();
   const messengerMediaType = messengerAttachmentType(mediaType);
@@ -608,7 +799,7 @@ async function sendBookingButtonIfAllowed(tenant, contact, origin) {
         payload: {
           template_type: "button",
           text: text.slice(0, 640),
-          buttons: [{ type: "web_url", url, title }],
+          buttons,
         },
       },
     },
@@ -683,6 +874,7 @@ async function sendMessengerButtonCard(tenant, contact, origin, text, buttonLabe
   if (!contact?.psid) return { sent: false, reason: "missing contact PSID" };
   if (contact.booked) return { sent: false, reason: "contact already booked" };
   const url = bookingUrlForTenant(tenant, origin, contact);
+  const buttons = messengerWebButtons(tenant, origin, contact, buttonLabel);
   await graphPost("/me/messages", {
     messaging_type: "RESPONSE",
     recipient: { id: contact.psid },
@@ -692,7 +884,7 @@ async function sendMessengerButtonCard(tenant, contact, origin, text, buttonLabe
         payload: {
           template_type: "button",
           text: cleanButtonCardText(interpolateMessage(text, contact, tenant, origin)).slice(0, 640),
-          buttons: [{ type: "web_url", url, title: String(buttonLabel || tenant.messenger?.buttonLabel || "Book now").slice(0, 20) }],
+          buttons,
         },
       },
     },
@@ -714,6 +906,8 @@ async function sendAbandonedBookingFollowUp(tenant, contact, origin) {
   if (result.sent) {
     contact.lastBookingAbandonedSentAt = new Date().toISOString();
     contact.bookingAbandonedFollowUpSent = true;
+    contact.bookingAbandonedFollowUpStatus = "sent";
+    contact.bookingAbandonedFollowUpError = "";
     tenantLog(tenant, `Sent booking-page follow-up to ${contact.name}.`);
   }
   return result;
@@ -728,15 +922,29 @@ async function scheduleBookingOpenFollowUp(input = {}) {
   if (contact.booked || contact.bookingAbandonedFollowUpSent) {
     return { scheduled: false, reason: contact.booked ? "contact already booked" : "already sent once", contactId: contact.id };
   }
+  if (isAbandonedFollowUpSending(contact)) {
+    return { scheduled: false, reason: "follow-up is already sending", contactId: contact.id };
+  }
+  if (hasPendingAbandonedFollowUp(contact)) {
+    const openedAt = new Date(contact.lastBookingOpenedAt || 0);
+    const continuedAt = new Date(contact.lastBookingContinuedAt || 0);
+    const continuedAfterOpen = Number.isFinite(continuedAt.getTime()) && continuedAt >= openedAt;
+    if (!continuedAfterOpen) {
+      return {
+        scheduled: false,
+        reason: "follow-up already scheduled",
+        dueAt: contact.bookingAbandonedFollowUpDueAt,
+        contactId: contact.id,
+      };
+    }
+  }
   const at = new Date().toISOString();
-  contact.lastBookingOpenedAt = at;
-  contact.lastBookingOpenedSource = input.source || "booking_page";
+  const dueAt = markAbandonedFollowUpScheduled(contact, tenant, input.source, at);
   tenantLog(tenant, `${contact.name} opened the booking page.`);
   await upsertTenants(tenants);
 
   const timerKey = `${tenant.id}:${contact.psid || contact.id}`;
   if (bookingOpenTimers.has(timerKey)) clearTimeout(bookingOpenTimers.get(timerKey));
-  const delayMinutes = Math.max(1, Number(tenant.followUp?.bookingAbandonedDelayMinutes || 5));
   const origin = input.origin;
   const timeout = setTimeout(async () => {
     bookingOpenTimers.delete(timerKey);
@@ -744,15 +952,29 @@ async function scheduleBookingOpenFollowUp(input = {}) {
       const freshTenants = await fetchTenants();
       const freshTenant = freshTenants.find((item) => item.id === tenant.id);
       const freshContact = freshTenant ? findTenantContact(freshTenant, input) : null;
-      if (!freshTenant || !freshContact || freshContact.booked || freshContact.bookingAbandonedFollowUpSent) return;
+      if (!freshTenant || !freshContact || freshContact.booked || freshContact.bookingAbandonedFollowUpSent || isAbandonedFollowUpSending(freshContact)) return;
+      const openedAt = new Date(freshContact.lastBookingOpenedAt || 0);
+      const continuedAt = new Date(freshContact.lastBookingContinuedAt || 0);
+      if (Number.isFinite(continuedAt.getTime()) && continuedAt >= openedAt) {
+        freshContact.bookingAbandonedFollowUpStatus = "canceled";
+        freshContact.bookingAbandonedFollowUpCanceledAt = new Date().toISOString();
+        await upsertTenants(freshTenants);
+        return;
+      }
+      markAbandonedFollowUpSending(freshContact);
+      await upsertTenants(freshTenants);
       const result = await sendAbandonedBookingFollowUp(freshTenant, freshContact, origin);
-      if (result.sent) await upsertTenants(freshTenants);
+      if (!result.sent) {
+        freshContact.bookingAbandonedFollowUpStatus = "failed";
+        freshContact.bookingAbandonedFollowUpError = result.reason || "not sent";
+      }
+      await upsertTenants(freshTenants);
     } catch (error) {
       console.warn("Booking abandoned follow-up failed:", error.message);
     }
-  }, delayMinutes * 60000);
+  }, Math.max(1000, (dueAt ? dueAt.getTime() - Date.now() : abandonedFollowUpDelayMinutes(tenant) * 60000)));
   bookingOpenTimers.set(timerKey, timeout);
-  return { scheduled: true, delayMinutes, contactId: contact.id };
+  return { scheduled: true, delayMinutes: abandonedFollowUpDelayMinutes(tenant), dueAt: contact.bookingAbandonedFollowUpDueAt, contactId: contact.id };
 }
 
 async function cancelBookingOpenFollowUp(input = {}) {
@@ -767,6 +989,10 @@ async function cancelBookingOpenFollowUp(input = {}) {
     bookingOpenTimers.delete(timerKey);
   }
   contact.lastBookingContinuedAt = new Date().toISOString();
+  if (!contact.bookingAbandonedFollowUpSent) {
+    contact.bookingAbandonedFollowUpStatus = "canceled";
+    contact.bookingAbandonedFollowUpCanceledAt = contact.lastBookingContinuedAt;
+  }
   tenantLog(tenant, `${contact.name} continued on the booking page.`);
   await upsertTenants(tenants);
   return { canceled: true, contactId: contact.id };
@@ -849,9 +1075,12 @@ async function scanAbandonedBookingFollowUps(origin = PUBLIC_ORIGIN) {
   let skipped = 0;
   let changed = false;
   for (const tenant of tenants) {
-    const delayMinutes = Math.max(1, Number(tenant.followUp?.bookingAbandonedDelayMinutes || 5));
+    if (tenant.followUp?.bookingAbandonedEnabled === false) {
+      skipped += (tenant.contacts || []).length;
+      continue;
+    }
     for (const contact of tenant.contacts || []) {
-      if (!contact.psid || contact.booked || contact.bookingAbandonedFollowUpSent) {
+      if (!contact.psid || contact.booked || contact.bookingAbandonedFollowUpSent || isAbandonedFollowUpSending(contact) || contact.bookingAbandonedFollowUpStatus === "failed") {
         skipped += 1;
         continue;
       }
@@ -862,22 +1091,41 @@ async function scanAbandonedBookingFollowUps(origin = PUBLIC_ORIGIN) {
       }
       const continuedAt = new Date(contact.lastBookingContinuedAt || 0);
       if (Number.isFinite(continuedAt.getTime()) && continuedAt >= openedAt) {
+        if (contact.bookingAbandonedFollowUpStatus === "scheduled") {
+          contact.bookingAbandonedFollowUpStatus = "canceled";
+          contact.bookingAbandonedFollowUpCanceledAt = new Date().toISOString();
+          changed = true;
+        }
         skipped += 1;
         continue;
       }
-      if (Date.now() - openedAt.getTime() < delayMinutes * 60000) {
+      const dueAt = new Date(contact.bookingAbandonedFollowUpDueAt || abandonedFollowUpDueAt(openedAt, tenant) || 0);
+      if (!contact.bookingAbandonedFollowUpDueAt && Number.isFinite(dueAt.getTime())) {
+        contact.bookingAbandonedFollowUpDueAt = dueAt.toISOString();
+        contact.bookingAbandonedFollowUpStatus = contact.bookingAbandonedFollowUpStatus || "scheduled";
+        changed = true;
+      }
+      if (!Number.isFinite(dueAt.getTime()) || dueAt > new Date()) {
         skipped += 1;
         continue;
       }
       try {
+        markAbandonedFollowUpSending(contact);
+        changed = true;
+        await upsertTenants(tenants);
         const result = await sendAbandonedBookingFollowUp(tenant, contact, origin);
         if (result.sent) {
           sent += 1;
           changed = true;
         } else {
+          contact.bookingAbandonedFollowUpStatus = "failed";
+          contact.bookingAbandonedFollowUpError = result.reason || "not sent";
           skipped += 1;
+          changed = true;
         }
       } catch (error) {
+        contact.bookingAbandonedFollowUpStatus = "failed";
+        contact.bookingAbandonedFollowUpError = error.message;
         tenantLog(tenant, `Booking-page follow-up failed for ${contact.name}: ${error.message}`);
         changed = true;
       }
@@ -999,6 +1247,7 @@ function mergeImportedContactsIntoTenant(tenant, contacts) {
     existing.inboundMessageCount = countInboundMessages(existing);
     updated += 1;
   });
+  tenant.contacts = dedupeTenantContacts(tenant.contacts);
   return { added, updated };
 }
 
@@ -1216,7 +1465,7 @@ async function uploadToCloudinary(input = {}) {
   const file = String(input.file || "");
   if (!file.startsWith("data:")) throw new ApiError(400, "Upload file must be a data URL.");
   const timestamp = Math.floor(Date.now() / 1000);
-  const folder = "followup-os/messenger";
+  const folder = input.folder === "booking" ? "followup-os/booking" : "followup-os/messenger";
   const signature = cloudinarySignature({ folder, timestamp });
   const form = new FormData();
   form.set("file", file);

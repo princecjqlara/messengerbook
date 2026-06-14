@@ -1227,6 +1227,14 @@ button {
   overflow-wrap: anywhere;
 }
 
+.summary-row a {
+  max-width: 60%;
+  color: var(--teal);
+  font-weight: 700;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
 .summary-answer-list {
   display: grid;
   gap: 8px;
@@ -1277,6 +1285,18 @@ iframe.reward-preview {
   line-height: 1.5;
 }
 
+.messenger-button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+}
+
+.messenger-button-row .btn {
+  flex: 1 1 140px;
+  justify-content: center;
+}
+
 .ab-card-preview textarea {
   width: 100%;
   min-height: 88px;
@@ -1297,6 +1317,60 @@ iframe.reward-preview {
 .ab-card-preview .muted {
   max-width: 100%;
   overflow-wrap: anywhere;
+}
+
+.embedded-site-page {
+  min-height: 100vh;
+  background: #ffffff;
+}
+
+.embedded-site-banner {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 72px;
+  padding: 12px clamp(14px, 4vw, 32px);
+  border-bottom: 1px solid var(--line);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.embedded-site-banner div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.embedded-site-banner strong,
+.embedded-site-banner span {
+  overflow-wrap: anywhere;
+}
+
+.embedded-site-banner span {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.embedded-site-frame {
+  display: block;
+  width: 100%;
+  height: calc(100vh - 72px);
+  border: 0;
+  background: #ffffff;
+}
+
+.embedded-site-empty {
+  display: grid;
+  gap: 12px;
+  align-content: center;
+  min-height: 100vh;
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 32px;
 }
 
 .hours-editor {
@@ -1411,6 +1485,16 @@ iframe.reward-preview {
 }
 
 @media (max-width: 720px) {
+  .embedded-site-banner {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .embedded-site-banner .btn {
+    width: 100%;
+    justify-content: center;
+  }
+
   .login-page {
     grid-template-columns: 1fr;
   }
