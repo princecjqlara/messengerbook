@@ -11,6 +11,7 @@ const DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL = "Book now";
 const DEFAULT_FIRST24_FIBONACCI_MINUTES = [10, 20, 30];
 const BOOKING_FIELD_TYPES = ["text", "textarea", "email", "phone", "multiple_choice", "media_upload"];
 const BOOKING_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
+const AB_BUTTON_MODES = ["both", "booking_only", "embedded_only"];
 
 const defaultHero = "assets/booking-hero.png";
 const now = new Date();
@@ -265,6 +266,7 @@ function normalizeTenant(tenant) {
     id: message.id || `m_${index + 1}_${uid().slice(0, 6)}`,
     text: message.text || "",
     buttonLabel: message.buttonLabel || normalized.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL,
+    buttonMode: AB_BUTTON_MODES.includes(message.buttonMode) ? message.buttonMode : "both",
     sent: Number(message.sent || 0),
     responses: Number(message.responses || 0),
   }));
@@ -1144,6 +1146,14 @@ function bookingFieldTypeLabel(type) {
   }[type] || type.replaceAll("_", " ");
 }
 
+function abButtonModeLabel(mode) {
+  return {
+    both: "Booking + embedded site",
+    booking_only: "Booking button only",
+    embedded_only: "Embedded site button only",
+  }[mode] || "Booking + embedded site";
+}
+
 function bookingContactParam() {
   return new URLSearchParams(location.search).get("contact") || "";
 }
@@ -1836,6 +1846,7 @@ function addMessage() {
     id: `m_${uid().slice(0, 8)}`,
     text: tenant.messenger?.welcomeMessage || DEFAULT_AB_MESSAGE,
     buttonLabel: tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL,
+    buttonMode: "both",
     sent: 0,
     responses: 0,
   });
@@ -1862,6 +1873,15 @@ function updateAbMessageButtonLabel(messageId, value) {
   if (!message) return;
   message.buttonLabel = value;
   saveState();
+}
+
+function updateAbMessageButtonMode(messageId, value) {
+  const tenant = activeTenant();
+  const message = tenant?.messages.find((item) => item.id === messageId);
+  if (!message) return;
+  message.buttonMode = AB_BUTTON_MODES.includes(value) ? value : "both";
+  saveState();
+  render();
 }
 
 function updateTemplateName(templateId, value) {
@@ -2675,22 +2695,83 @@ function renderAutomation(tenant) {
   const ranked = bestMessages(tenant);
   return `
     <section class="section-head">
-      <div><h1>Automation</h1><p>Set follow-up intervals, keep human agent messaging inside the 7-day window, and switch to utility templates after silence.</p></div>
-      <button class="btn primary" id="addMessage">Add A/B message</button>
+      <div><h1>Automation</h1><p>Separate the send rules from the A/B test. Timing decides when a card is sent; A/B testing decides which message and button the card uses.</p></div>
     </section>
     <div class="grid two">
       <div class="panel">
-        <h2>Follow-up rules</h2>
+        <div class="message-top">
+          <h2>A/B message and button tests</h2>
+          <button class="btn primary" id="addMessage">Add A/B message</button>
+        </div>
+        <div class="stack">
+          <label class="inline-row"><input data-boolean-path="messenger.autoAbFollowUpEnabled" type="checkbox" ${tenant.messenger.autoAbFollowUpEnabled !== false ? "checked" : ""}> <span>Use A/B variants for automated booking cards</span></label>
+          ${ranked.length ? ranked.map((message, index) => `
+            <div class="message-item ab-card-editor">
+              <div class="message-top">
+                <span class="status-pill ${index === 0 ? "dark" : ""}">Rank ${index + 1}</span>
+                <div class="inline-row"><button class="btn small" data-respond="${message.id}">+ response</button><button class="icon-btn" title="Remove message" data-remove-message="${message.id}">X</button></div>
+              </div>
+              <div class="messenger-preview ab-card-preview">
+                <span class="mini-label">A/B button card</span>
+                <textarea data-message="${message.id}" aria-label="A/B card body">${escapeHtml(abMessageText(message, tenant))}</textarea>
+                <label class="field compact-field"><span>Booking button text</span><input data-message-button="${message.id}" value="${escapeAttr(message.buttonLabel || tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL)}" maxlength="20"></label>
+                <label class="field compact-field"><span>Buttons to show</span><select data-message-button-mode="${message.id}">
+                  ${AB_BUTTON_MODES.map((mode) => `<option value="${mode}" ${(message.buttonMode || "both") === mode ? "selected" : ""}>${escapeHtml(abButtonModeLabel(mode))}</option>`).join("")}
+                </select></label>
+                ${renderMessengerButtonsPreview({ ...tenant, messenger: { ...tenant.messenger, buttonLabel: message.buttonLabel || tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL } }, message.buttonMode || "both")}
+                <span class="muted">${escapeHtml(messengerBookingUrl(tenant))}</span>
+                ${embeddedPageEnabled(tenant) ? `<span class="muted">${escapeHtml(embeddedSiteUrl(tenant))}</span>` : ""}
+              </div>
+              <div class="inline-row">
+                <span class="muted">${message.responses}/${message.sent} responses</span>
+                <strong>${messageScore(message)}%</strong>
+              </div>
+              <div class="scorebar"><span style="width:${messageScore(message)}%"></span></div>
+            </div>
+          `).join("") : `<div class="empty">No A/B messages yet. Add a message to test card copy and button text.</div>`}
+          <div class="message-item">
+            <div class="message-top">
+              <strong>Shared card buttons</strong>
+            </div>
+            <label class="inline-row"><input data-boolean-path="messenger.embeddedPageEnabled" type="checkbox" ${tenant.messenger.embeddedPageEnabled ? "checked" : ""}> <span>Add embedded-page button</span></label>
+            <label class="field"><span>Embedded page URL</span><input data-path="messenger.embeddedPageUrl" value="${escapeAttr(tenant.messenger.embeddedPageUrl || "")}" placeholder="https://example.com"></label>
+            <div class="split-row">
+              <label class="field"><span>Embedded button text</span><input data-path="messenger.embeddedPageButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}"></label>
+              <label class="field"><span>Banner button text</span><input data-path="messenger.embeddedPageBannerButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL)}"></label>
+            </div>
+            <label class="field"><span>Embedded page banner</span><textarea data-path="messenger.embeddedPageBannerMessage">${escapeHtml(tenant.messenger.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE)}</textarea></label>
+            <div class="booking-summary">
+              <strong>Button destinations</strong>
+              <span>${escapeHtml(messengerBookingUrl(tenant))}</span>
+              ${embeddedPageEnabled(tenant) ? `<span>${escapeHtml(embeddedSiteUrl(tenant))}</span>` : ""}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Timing and send rules</h2>
         <div class="stack">
           <label class="field"><span>Human window days</span><input data-path="followUp.humanWindowDays" type="number" min="1" value="${tenant.followUp.humanWindowDays}"></label>
           <label class="field"><span>Human interval pattern, days</span><input data-path="followUp.pattern" value="${tenant.followUp.pattern.join(", ")}"><small class="muted">Examples: 1,3,3 or 1,1,3,7</small></label>
           <label class="field"><span>After 7-day window, send every N days</span><input data-path="followUp.afterWindowEveryDays" type="number" min="1" value="${tenant.followUp.afterWindowEveryDays}"></label>
           <div class="message-item">
             <div class="message-top">
-              <strong>First 24 hours Fibonacci follow-up</strong>
+              <strong>First 24 hours send schedule</strong>
               <label class="inline-row"><input data-boolean-path="followUp.first24FibonacciEnabled" type="checkbox" ${tenant.followUp.first24FibonacciEnabled !== false ? "checked" : ""}> <span>Enabled</span></label>
             </div>
-            <label class="field"><span>Intervals in minutes</span><input data-path="followUp.first24FibonacciMinutes" value="${(tenant.followUp.first24FibonacciMinutes || DEFAULT_FIRST24_FIBONACCI_MINUTES).join(", ")}"><small class="muted">Default: first after 10 minutes, then 20 minutes later, then 30 minutes later.</small></label>
+            <label class="field"><span>Send after minutes</span><input data-path="followUp.first24FibonacciMinutes" value="${(tenant.followUp.first24FibonacciMinutes || DEFAULT_FIRST24_FIBONACCI_MINUTES).join(", ")}"><small class="muted">These times only decide when to send. The A/B panel decides message and button copy.</small></label>
+          </div>
+          <div class="message-item">
+            <div class="message-top">
+              <strong>New contact trigger</strong>
+              <label class="inline-row"><input data-boolean-path="messenger.welcomeEnabled" type="checkbox" ${tenant.messenger.welcomeEnabled ? "checked" : ""}> <span>Send automatically</span></label>
+            </div>
+            <label class="field"><span>Do not send after team message, minutes</span><input data-number-path="messenger.suppressAfterUserMessageMinutes" type="number" min="0" step="1" value="${Number(tenant.messenger.suppressAfterUserMessageMinutes ?? 60)}"></label>
+            <div class="split-row">
+              <label class="inline-row"><input data-boolean-path="followUp.quietHoursEnabled" type="checkbox" ${tenant.followUp.quietHoursEnabled !== false ? "checked" : ""}> <span>Use quiet hours</span></label>
+              <label class="field"><span>Quiet start</span><input data-path="followUp.quietHoursStart" type="time" value="${tenant.followUp.quietHoursStart || "20:00"}" ${tenant.followUp.quietHoursEnabled === false ? "disabled" : ""}></label>
+              <label class="field"><span>Quiet end</span><input data-path="followUp.quietHoursEnd" type="time" value="${tenant.followUp.quietHoursEnd || "08:00"}" ${tenant.followUp.quietHoursEnabled === false ? "disabled" : ""}></label>
+            </div>
           </div>
           <div class="message-item">
             <div class="message-top">
@@ -2698,14 +2779,6 @@ function renderAutomation(tenant) {
               <label class="inline-row"><input data-boolean-path="followUp.bookingAbandonedEnabled" type="checkbox" ${tenant.followUp.bookingAbandonedEnabled !== false ? "checked" : ""}> <span>Enabled</span></label>
             </div>
             <label class="field"><span>Wait minutes before sending</span><input data-number-path="followUp.bookingAbandonedDelayMinutes" type="number" min="1" value="${Number(tenant.followUp.bookingAbandonedDelayMinutes || 5)}"></label>
-            <label class="field"><span>Follow-up message</span><textarea data-path="followUp.bookingAbandonedMessage">${escapeHtml(tenant.followUp.bookingAbandonedMessage || "")}</textarea></label>
-          </div>
-          <div class="split-row">
-            <label class="field"><span>Messenger CTA</span><input data-path="messenger.cta" value="${escapeAttr(tenant.messenger.cta)}"></label>
-            <label class="field"><span>Button label</span><input data-path="messenger.buttonLabel" value="${escapeAttr(tenant.messenger.buttonLabel)}"></label>
-            <label class="inline-row"><input data-boolean-path="followUp.quietHoursEnabled" type="checkbox" ${tenant.followUp.quietHoursEnabled !== false ? "checked" : ""}> <span>Use quiet hours</span></label>
-            <label class="field"><span>Quiet start</span><input data-path="followUp.quietHoursStart" type="time" value="${tenant.followUp.quietHoursStart || "20:00"}" ${tenant.followUp.quietHoursEnabled === false ? "disabled" : ""}></label>
-            <label class="field"><span>Quiet end</span><input data-path="followUp.quietHoursEnd" type="time" value="${tenant.followUp.quietHoursEnd || "08:00"}" ${tenant.followUp.quietHoursEnabled === false ? "disabled" : ""}></label>
           </div>
           <div class="message-item">
             <div class="message-top">
@@ -2718,77 +2791,39 @@ function renderAutomation(tenant) {
               <label class="field"><span>Before meeting, minutes</span><input data-number-path="followUp.bookingReminderBeforeMinutes" type="number" min="1" value="${Number(tenant.followUp.bookingReminderBeforeMinutes || 60)}"></label>
               <label class="field"><span>Final reminder, minutes</span><input data-number-path="followUp.bookingReminderFinalMinutes" type="number" min="1" value="${Number(tenant.followUp.bookingReminderFinalMinutes || 15)}"></label>
             </div>
-            <label class="field"><span>Day-of message</span><textarea data-path="followUp.bookingReminderDayOfMessage">${escapeHtml(tenant.followUp.bookingReminderDayOfMessage || "")}</textarea></label>
-            <label class="field"><span>Before meeting message</span><textarea data-path="followUp.bookingReminderBeforeMessage">${escapeHtml(tenant.followUp.bookingReminderBeforeMessage || "")}</textarea></label>
-            <label class="field"><span>Final reminder message</span><textarea data-path="followUp.bookingReminderFinalMessage">${escapeHtml(tenant.followUp.bookingReminderFinalMessage || "")}</textarea></label>
-            <span class="muted">Variables: {{firstName}}, {{name}}, {{meetingDate}}, {{meetingTime}}, {{minutesBefore}}</span>
-          </div>
-          <div class="message-item">
-            <div class="message-top">
-              <strong>New-contact welcome button</strong>
-              <label class="inline-row"><input data-boolean-path="messenger.welcomeEnabled" type="checkbox" ${tenant.messenger.welcomeEnabled ? "checked" : ""}> <span>Send automatically</span></label>
-            </div>
-            <label class="inline-row"><input data-boolean-path="messenger.autoAbFollowUpEnabled" type="checkbox" ${tenant.messenger.autoAbFollowUpEnabled !== false ? "checked" : ""}> <span>Send one A/B button card when contact messages</span></label>
-            <label class="field"><span>Welcome message</span><textarea data-path="messenger.welcomeMessage">${escapeHtml(tenant.messenger.welcomeMessage)}</textarea></label>
-            <label class="field"><span>Button text</span><input data-path="messenger.buttonLabel" value="${escapeAttr(tenant.messenger.buttonLabel)}"></label>
-            <label class="field"><span>Photo/media</span><input data-cloudinary-upload="messenger.welcomeMediaUrl" data-cloudinary-type-path="messenger.welcomeMediaType" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx"></label>
-            <label class="field"><span>Uploaded media URL (optional)</span><input data-path="messenger.welcomeMediaUrl" value="${escapeAttr(tenant.messenger.welcomeMediaUrl || "")}" placeholder="Optional media URL"></label>
-            ${tenant.messenger.welcomeMediaUrl ? `<button class="btn small" data-clear-media="messenger.welcomeMediaUrl:messenger.welcomeMediaType" type="button">Remove media</button>` : ""}
-            <label class="inline-row"><input data-boolean-path="messenger.embeddedPageEnabled" type="checkbox" ${tenant.messenger.embeddedPageEnabled ? "checked" : ""}> <span>Add embedded-page button</span></label>
-            <label class="field"><span>Embedded page URL</span><input data-path="messenger.embeddedPageUrl" value="${escapeAttr(tenant.messenger.embeddedPageUrl || "")}" placeholder="https://example.com"></label>
-            <div class="split-row">
-              <label class="field"><span>Embedded button text</span><input data-path="messenger.embeddedPageButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}"></label>
-              <label class="field"><span>Banner button text</span><input data-path="messenger.embeddedPageBannerButtonLabel" maxlength="20" value="${escapeAttr(tenant.messenger.embeddedPageBannerButtonLabel || DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL)}"></label>
-            </div>
-            <label class="field"><span>Embedded page banner</span><textarea data-path="messenger.embeddedPageBannerMessage">${escapeHtml(tenant.messenger.embeddedPageBannerMessage || DEFAULT_EMBEDDED_PAGE_BANNER_MESSAGE)}</textarea></label>
-            <label class="field"><span>Do not send after team message, minutes</span><input data-number-path="messenger.suppressAfterUserMessageMinutes" type="number" min="0" step="1" value="${Number(tenant.messenger.suppressAfterUserMessageMinutes ?? 60)}"></label>
-            <div class="booking-summary">
-              <strong>${escapeHtml(tenant.messenger.buttonLabel)}</strong>
-              ${tenant.messenger.welcomeMediaUrl ? `<span>${escapeHtml(tenant.messenger.welcomeMediaUrl)}</span>` : ""}
-              <span>${escapeHtml(messengerBookingUrl(tenant))}</span>
-              ${embeddedPageEnabled(tenant) ? `<span>${escapeHtml(embeddedSiteUrl(tenant))}</span>` : ""}
-            </div>
           </div>
         </div>
       </div>
+    </div>
+    <div class="grid two" style="margin-top:16px">
       <div class="panel">
-        <h2>Utility templates</h2>
+        <h2>Fallback and media content</h2>
+        <div class="stack">
+          <label class="field"><span>Fallback CTA text</span><input data-path="messenger.cta" value="${escapeAttr(tenant.messenger.cta)}"></label>
+          <label class="field"><span>Fallback welcome message</span><textarea data-path="messenger.welcomeMessage">${escapeHtml(tenant.messenger.welcomeMessage)}</textarea></label>
+          <label class="field"><span>Fallback booking button text</span><input data-path="messenger.buttonLabel" value="${escapeAttr(tenant.messenger.buttonLabel)}"></label>
+          <label class="field"><span>Photo/media before card</span><input data-cloudinary-upload="messenger.welcomeMediaUrl" data-cloudinary-type-path="messenger.welcomeMediaType" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx"></label>
+          <label class="field"><span>Uploaded media URL</span><input data-path="messenger.welcomeMediaUrl" value="${escapeAttr(tenant.messenger.welcomeMediaUrl || "")}" placeholder="Optional media URL"></label>
+          ${tenant.messenger.welcomeMediaUrl ? `<button class="btn small" data-clear-media="messenger.welcomeMediaUrl:messenger.welcomeMediaType" type="button">Remove media</button>` : ""}
+          <label class="field"><span>Opened-booking follow-up message</span><textarea data-path="followUp.bookingAbandonedMessage">${escapeHtml(tenant.followUp.bookingAbandonedMessage || "")}</textarea></label>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Utility and reminder messages</h2>
         <div class="stack">
           <label class="field"><span>Template after silence</span><select data-path="messenger.postWindowTemplate">${tenant.templates.map((template) => `<option value="${escapeAttr(template.name)}" ${template.name === tenant.messenger.postWindowTemplate ? "selected" : ""}>${escapeHtml(template.name)}</option>`).join("")}</select></label>
-          ${tenant.templates.map((template, index) => `
+          ${tenant.templates.map((template) => `
             <div class="rule-item">
               <input class="inline-input" data-template-name="${template.id}" value="${escapeAttr(template.name)}">
               <textarea data-template-text="${template.id}">${escapeHtml(template.text)}</textarea>
             </div>
           `).join("")}
           <button class="btn" id="addTemplate">Add utility template</button>
+          <label class="field"><span>Day-of reminder message</span><textarea data-path="followUp.bookingReminderDayOfMessage">${escapeHtml(tenant.followUp.bookingReminderDayOfMessage || "")}</textarea></label>
+          <label class="field"><span>Before meeting message</span><textarea data-path="followUp.bookingReminderBeforeMessage">${escapeHtml(tenant.followUp.bookingReminderBeforeMessage || "")}</textarea></label>
+          <label class="field"><span>Final reminder message</span><textarea data-path="followUp.bookingReminderFinalMessage">${escapeHtml(tenant.followUp.bookingReminderFinalMessage || "")}</textarea></label>
+          <span class="muted">Variables: {{firstName}}, {{name}}, {{meetingDate}}, {{meetingTime}}, {{minutesBefore}}</span>
         </div>
-      </div>
-    </div>
-    <div class="panel" style="margin-top:16px">
-      <h2>A/B button card ranking</h2>
-      <div class="stack">
-        ${ranked.map((message, index) => `
-          <div class="message-item ab-card-editor">
-            <div class="message-top">
-              <span class="status-pill ${index === 0 ? "dark" : ""}">Rank ${index + 1}</span>
-              <div class="inline-row"><button class="btn small" data-respond="${message.id}">+ response</button><button class="icon-btn" title="Remove message" data-remove-message="${message.id}">X</button></div>
-            </div>
-            <div class="messenger-preview ab-card-preview">
-              <span class="mini-label">Messenger button card</span>
-              <textarea data-message="${message.id}" aria-label="A/B card body">${escapeHtml(abMessageText(message, tenant))}</textarea>
-              <label class="field compact-field"><span>Button text</span><input data-message-button="${message.id}" value="${escapeAttr(message.buttonLabel || tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL)}" maxlength="20"></label>
-              ${renderMessengerButtonsPreview({ ...tenant, messenger: { ...tenant.messenger, buttonLabel: message.buttonLabel || tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL } })}
-              <span class="muted">${escapeHtml(messengerBookingUrl(tenant))}</span>
-              ${embeddedPageEnabled(tenant) ? `<span class="muted">${escapeHtml(embeddedSiteUrl(tenant))}</span>` : ""}
-            </div>
-            <div class="inline-row">
-              <span class="muted">${message.responses}/${message.sent} responses</span>
-              <strong>${messageScore(message)}%</strong>
-            </div>
-            <div class="scorebar"><span style="width:${messageScore(message)}%"></span></div>
-          </div>
-        `).join("")}
       </div>
     </div>
   `;
@@ -3100,11 +3135,16 @@ function renderEmbeddedSiteUnavailable() {
   `;
 }
 
-function renderMessengerButtonsPreview(tenant) {
+function renderMessengerButtonsPreview(tenant, buttonMode = "both") {
+  const mode = AB_BUTTON_MODES.includes(buttonMode) ? buttonMode : "both";
+  const showEmbedded = mode !== "booking_only";
+  const showBooking = mode !== "embedded_only";
+  const hasEmbedded = embeddedPageEnabled(tenant);
   return `
     <div class="messenger-button-row">
-      ${embeddedPageEnabled(tenant) ? `<button class="btn small" type="button">${escapeHtml(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}</button>` : ""}
-      <button class="btn small primary" type="button">${escapeHtml(tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL)}</button>
+      ${showEmbedded && hasEmbedded ? `<button class="btn small" type="button">${escapeHtml(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL)}</button>` : ""}
+      ${showBooking ? `<button class="btn small primary" type="button">${escapeHtml(tenant.messenger.buttonLabel || DEFAULT_AB_BUTTON_LABEL)}</button>` : ""}
+      ${showEmbedded && !hasEmbedded ? `<span class="muted">Embedded site button needs a configured embedded page URL.</span>` : ""}
     </div>
   `;
 }
@@ -3320,6 +3360,9 @@ function wireAdmin() {
   document.querySelectorAll("[data-message-button]").forEach((field) => {
     field.addEventListener("input", () => updateAbMessageButtonLabel(field.dataset.messageButton, field.value));
     field.addEventListener("change", () => updateAbMessageButtonLabel(field.dataset.messageButton, field.value));
+  });
+  document.querySelectorAll("[data-message-button-mode]").forEach((field) => {
+    field.addEventListener("change", () => updateAbMessageButtonMode(field.dataset.messageButtonMode, field.value));
   });
   document.querySelectorAll("[data-template-name]").forEach((field) => {
     field.addEventListener("input", () => updateTemplateName(field.dataset.templateName, field.value));

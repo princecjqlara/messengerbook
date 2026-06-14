@@ -29,6 +29,7 @@ const DEFAULT_EMBEDDED_PAGE_BANNER_BUTTON_LABEL = "Book now";
 const DEFAULT_FIRST24_FIBONACCI_MINUTES = [10, 20, 30];
 const BOOKING_ABANDONED_SEND_LOCK_MINUTES = 15;
 const BOOKING_FIELD_TYPES = ["text", "textarea", "email", "phone", "multiple_choice", "media_upload"];
+const AB_BUTTON_MODES = ["both", "booking_only", "embedded_only"];
 const bookingOpenTimers = new Map();
 let automaticFollowUpScanRunning = false;
 let scheduledTasksRunning = false;
@@ -218,6 +219,7 @@ function normalizeTenantAbMessages(tenant) {
     id: message.id || `m_${index + 1}_${Math.random().toString(36).slice(2, 8)}`,
     text: message.text || "",
     buttonLabel: message.buttonLabel || buttonLabel,
+    buttonMode: AB_BUTTON_MODES.includes(message.buttonMode) ? message.buttonMode : "both",
     sent: Number(message.sent || 0),
     responses: Number(message.responses || 0),
   })) : [];
@@ -579,20 +581,30 @@ function embeddedSiteUrlForTenant(tenant, origin, contact = null) {
   return `${origin}/index.html?${params.toString()}#site/${encodeURIComponent(slug)}`;
 }
 
-function messengerWebButtons(tenant, origin, contact, bookingTitle = DEFAULT_AB_BUTTON_LABEL) {
+function messengerWebButtons(tenant, origin, contact, bookingTitle = DEFAULT_AB_BUTTON_LABEL, buttonMode = "both") {
+  const mode = AB_BUTTON_MODES.includes(buttonMode) ? buttonMode : "both";
   const buttons = [];
-  if (tenant.messenger?.embeddedPageEnabled && safeExternalUrl(tenant.messenger.embeddedPageUrl)) {
+  if (mode !== "booking_only" && tenant.messenger?.embeddedPageEnabled && safeExternalUrl(tenant.messenger.embeddedPageUrl)) {
     buttons.push({
       type: "web_url",
       url: embeddedSiteUrlForTenant(tenant, origin, contact),
       title: String(tenant.messenger.embeddedPageButtonLabel || DEFAULT_EMBEDDED_PAGE_BUTTON_LABEL).slice(0, 20),
     });
   }
-  buttons.push({
-    type: "web_url",
-    url: bookingUrlForTenant(tenant, origin, contact),
-    title: String(bookingTitle || tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL).slice(0, 20),
-  });
+  if (mode !== "embedded_only") {
+    buttons.push({
+      type: "web_url",
+      url: bookingUrlForTenant(tenant, origin, contact),
+      title: String(bookingTitle || tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL).slice(0, 20),
+    });
+  }
+  if (!buttons.length) {
+    buttons.push({
+      type: "web_url",
+      url: bookingUrlForTenant(tenant, origin, contact),
+      title: String(bookingTitle || tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL).slice(0, 20),
+    });
+  }
   return buttons.slice(0, 3);
 }
 
@@ -705,6 +717,17 @@ function abButtonLabel(message, tenant) {
   return String(message?.buttonLabel || tenant.messenger?.buttonLabel || DEFAULT_AB_BUTTON_LABEL).slice(0, 20);
 }
 
+function canSendInitialInboundCard(contact) {
+  if (!contact || contact.booked) return false;
+  if (Number(contact.first24FollowUpsSent || 0) > 0) return false;
+  if (contact.lastAbMessageSentAt || contact.lastBookingButtonSentAt) return false;
+  return true;
+}
+
+function markFirst24SlotConsumed(contact) {
+  contact.first24FollowUpsSent = Math.max(1, Number(contact.first24FollowUpsSent || 0));
+}
+
 async function sendAbFollowUpIfAvailable(tenant, contact, origin) {
   if (tenant.messenger?.autoAbFollowUpEnabled === false) return { sent: false, reason: "disabled" };
   if (contact?.booked) return { sent: false, reason: "contact already booked" };
@@ -715,7 +738,7 @@ async function sendAbFollowUpIfAvailable(tenant, contact, origin) {
   const url = bookingUrlForTenant(tenant, origin, contact);
   const text = interpolateMessage(abMessageText(message, tenant), contact, tenant, origin).slice(0, 640);
   const title = abButtonLabel(message, tenant);
-  const buttons = messengerWebButtons(tenant, origin, contact, title);
+  const buttons = messengerWebButtons(tenant, origin, contact, title, message.buttonMode || "both");
   await graphPost("/me/messages", {
     messaging_type: "RESPONSE",
     recipient: { id: contact.psid },
@@ -1286,6 +1309,10 @@ async function captureWebhookContacts(body, origin) {
     if (responseMessageId) {
       tenantLog(event.__tenant, `Counted A/B response for ${responseMessageId} from ${event.__contact.name}.`);
     }
+    if (!canSendInitialInboundCard(event.__contact)) {
+      tenantLog(event.__tenant, `Did not send A/B or booking card to ${event.__contact.name}: first card timing already used.`);
+      continue;
+    }
     let abSent = false;
     try {
       const abResult = await sendAbFollowUpIfAvailable(event.__tenant, event.__contact, origin);
@@ -1293,6 +1320,7 @@ async function captureWebhookContacts(body, origin) {
       tenantLog(event.__tenant, abResult.sent
         ? `Sent A/B button card ${abResult.messageId} to ${event.__contact.name}.`
         : `Did not send A/B follow-up to ${event.__contact.name}: ${abResult.reason}.`);
+      if (abResult.sent) markFirst24SlotConsumed(event.__contact);
     } catch (error) {
       tenantLog(event.__tenant, `A/B follow-up send failed for ${event.__contact.name}: ${error.message}`);
     }
@@ -1305,6 +1333,7 @@ async function captureWebhookContacts(body, origin) {
       tenantLog(event.__tenant, result.sent
         ? `Sent booking button${result.mediaSent ? " with media" : ""} to ${event.__contact.name}.`
         : `Did not send booking button to ${event.__contact.name}: ${result.reason}.`);
+      if (result.sent) markFirst24SlotConsumed(event.__contact);
     } catch (error) {
       tenantLog(event.__tenant, `Booking button send failed for ${event.__contact.name}: ${error.message}`);
     }
