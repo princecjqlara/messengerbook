@@ -380,14 +380,32 @@ async function pushRemoteState() {
 async function hydrateRemoteState() {
   if (!apiEnabled()) return;
   try {
-    const currentUserId = state.currentUserId;
-    const authToken = state.authToken;
+    const localUi = {
+      currentUserId: state.currentUserId,
+      authToken: state.authToken,
+      activeTenantId: state.activeTenantId,
+      view: state.view,
+      selectedSlot: state.selectedSlot,
+      selectedBookingDay: state.selectedBookingDay,
+      bookingCalendarMonth: state.bookingCalendarMonth,
+      adminBookingCalendarMonth: state.adminBookingCalendarMonth,
+      showAllBookingTimes: state.showAllBookingTimes,
+    };
     const payload = await apiRequest("/api/state");
     if (!payload.state) return;
+    const hasCurrentUser = payload.state.users?.some((user) => user.id === localUi.currentUserId);
+    const hasActiveTenant = payload.state.tenants?.some((tenant) => tenant.id === localUi.activeTenantId);
     state = repairState({
       ...payload.state,
-      currentUserId: payload.state.users?.some((user) => user.id === currentUserId) ? currentUserId : null,
-      authToken: payload.state.users?.some((user) => user.id === currentUserId) ? authToken : "",
+      currentUserId: hasCurrentUser ? localUi.currentUserId : null,
+      authToken: hasCurrentUser ? localUi.authToken : "",
+      activeTenantId: hasActiveTenant ? localUi.activeTenantId : payload.state.activeTenantId,
+      view: localUi.view || payload.state.view || "dashboard",
+      selectedSlot: localUi.selectedSlot,
+      selectedBookingDay: localUi.selectedBookingDay,
+      bookingCalendarMonth: localUi.bookingCalendarMonth,
+      adminBookingCalendarMonth: localUi.adminBookingCalendarMonth,
+      showAllBookingTimes: localUi.showAllBookingTimes,
     });
     saveState({ localOnly: true });
     render();
