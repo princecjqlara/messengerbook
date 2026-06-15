@@ -574,6 +574,23 @@ button {
   gap: 6px;
 }
 
+.contact-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 2px 0 6px;
+}
+
+.contact-tags span {
+  padding: 3px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f7f8f9;
+  color: var(--ink);
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .pipeline-last-message {
   margin: 0;
   color: var(--ink);
@@ -626,6 +643,10 @@ button {
   grid-template-columns: repeat(3, minmax(120px, 1fr));
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.contact-tags-field {
+  grid-column: 1 / -1;
 }
 
 .compact-field span {

@@ -376,6 +376,20 @@ function countInboundMessages(contact) {
   return (contact.engagement || []).filter((event) => event.type === "reply").length;
 }
 
+function normalizeContactTags(value) {
+  const source = Array.isArray(value) ? value : String(value || "").split(",");
+  const seen = new Set();
+  return source
+    .map((tag) => String(tag || "").trim())
+    .filter((tag) => {
+      const key = tag.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
+}
+
 function contactIdentityKeys(contact = {}) {
   const name = String(contact.name || "").trim().toLowerCase();
   const email = String(contact.email || "").trim().toLowerCase();
@@ -437,6 +451,7 @@ function mergeContactRecord(existing, incoming) {
   existing.bookingSummary = existing.bookingSummary || incoming.bookingSummary || "";
   existing.bookingAnswers = existing.bookingAnswers || incoming.bookingAnswers || [];
   existing.notes = existing.notes || incoming.notes || "";
+  existing.tags = normalizeContactTags([...(existing.tags || []), ...(incoming.tags || [])]);
   existing.followUpsSent = Math.max(Number(existing.followUpsSent || 0), Number(incoming.followUpsSent || 0));
   existing.first24FollowUpsSent = Math.max(Number(existing.first24FollowUpsSent || 0), Number(incoming.first24FollowUpsSent || 0));
   existing.engagement = mergeContactEngagement(existing.engagement || [], incoming.engagement || []);

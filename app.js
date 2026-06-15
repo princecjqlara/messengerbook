@@ -674,6 +674,30 @@ function contactBookingSummary(tenant, contact) {
   return contact.bookingSummary || contactBooking(tenant, contact)?.summary || "";
 }
 
+function normalizeContactTags(value) {
+  const source = Array.isArray(value) ? value : String(value || "").split(",");
+  const seen = new Set();
+  return source
+    .map((tag) => String(tag || "").trim())
+    .filter((tag) => {
+      const key = tag.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 20);
+}
+
+function contactTags(contact) {
+  return normalizeContactTags(contact?.tags || []);
+}
+
+function renderContactTags(contact) {
+  const tags = contactTags(contact);
+  if (!tags.length) return "";
+  return `<div class="contact-tags">${tags.map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}</div>`;
+}
+
 function pipelineStatusClass(stage) {
   if (stage === "booked_done") return "dark";
   if (stage === "booked") return "good";
@@ -1744,6 +1768,7 @@ function mergeContactRecord(existing, incoming) {
   existing.bookingSummary = existing.bookingSummary || incoming.bookingSummary || "";
   existing.bookingAnswers = existing.bookingAnswers || incoming.bookingAnswers || [];
   existing.notes = existing.notes || incoming.notes || "";
+  existing.tags = normalizeContactTags([...(existing.tags || []), ...(incoming.tags || [])]);
   existing.followUpsSent = Math.max(Number(existing.followUpsSent || 0), Number(incoming.followUpsSent || 0));
   existing.first24FollowUpsSent = Math.max(Number(existing.first24FollowUpsSent || 0), Number(incoming.first24FollowUpsSent || 0));
   existing.engagement = mergeEngagement(existing.engagement || [], incoming.engagement || []);
@@ -1927,6 +1952,7 @@ function captureNewMessengerContact(input = {}) {
     engagement: [{ at: now.toISOString(), type: "message" }],
     booked: false,
     followUpsSent: 0,
+    tags: [],
   };
   tenant.contacts.unshift(contact);
   sendWelcomeButton(contact, tenant);
@@ -1994,6 +2020,7 @@ function updateContactField(contactId, field, value) {
   const contact = tenant?.contacts.find((item) => item.id === contactId);
   if (!contact) return;
   contact[field] = value;
+  if (field === "tags") contact.tags = normalizeContactTags(value);
   if (field === "booked") contact.booked = Boolean(value);
   if (field === "booked" && !contact.booked) contact.bookedDone = false;
   if (field === "bookedDone") {
@@ -2721,6 +2748,7 @@ function renderPipelineContactCard(contact, tenant) {
         <span class="status-pill info">${inboundMessageCount(contact)} msg</span>
         <span class="status-pill info">${escapeHtml(formatBestContactTime(contact))}</span>
       </div>
+      ${renderContactTags(contact)}
       ${contact.lastMessageText ? `<p class="pipeline-last-message">${escapeHtml(contact.lastMessageText).slice(0, 130)}</p>` : `<p class="pipeline-last-message muted">No message preview yet.</p>`}
       <div class="pipeline-next"><strong>${escapeHtml(plan.mode)}</strong><span>${escapeHtml(plan.label)}</span></div>
       ${summary ? `<pre class="summary-text pipeline-summary">${escapeHtml(summary)}</pre>` : ""}
@@ -2787,7 +2815,9 @@ function renderContacts(tenant) {
                   <label class="field compact-field"><span>Name</span><input data-contact-field="${escapeAttr(contact.id)}:name" value="${escapeAttr(contact.name || "")}"></label>
                   <label class="field compact-field"><span>Email</span><input data-contact-field="${escapeAttr(contact.id)}:email" value="${escapeAttr(contact.email || "")}"></label>
                   <label class="field compact-field"><span>Phone</span><input data-contact-field="${escapeAttr(contact.id)}:phone" value="${escapeAttr(contact.phone || "")}"></label>
+                  <label class="field compact-field contact-tags-field"><span>Tags</span><input data-contact-field="${escapeAttr(contact.id)}:tags" value="${escapeAttr(contactTags(contact).join(", "))}" placeholder="vip, follow up"></label>
                 </div>
+                ${renderContactTags(contact)}
                 <span class="muted">Last message ${formatDateTime(contact.lastMessageAt)}</span>${contact.lastMessageText ? `<br><span class="muted">${escapeHtml(contact.lastMessageText).slice(0, 90)}</span>` : ""}
               </td>
               <td>
@@ -2867,7 +2897,9 @@ function renderContactsPipeline(tenant) {
                   <label class="field compact-field"><span>Name</span><input data-contact-field="${escapeAttr(contact.id)}:name" value="${escapeAttr(contact.name || "")}"></label>
                   <label class="field compact-field"><span>Email</span><input data-contact-field="${escapeAttr(contact.id)}:email" value="${escapeAttr(contact.email || "")}"></label>
                   <label class="field compact-field"><span>Phone</span><input data-contact-field="${escapeAttr(contact.id)}:phone" value="${escapeAttr(contact.phone || "")}"></label>
+                  <label class="field compact-field contact-tags-field"><span>Tags</span><input data-contact-field="${escapeAttr(contact.id)}:tags" value="${escapeAttr(contactTags(contact).join(", "))}" placeholder="vip, follow up"></label>
                 </div>
+                ${renderContactTags(contact)}
                 <span class="muted">Last message ${formatDateTime(contact.lastMessageAt)}</span>${contact.lastMessageText ? `<br><span class="muted">${escapeHtml(contact.lastMessageText).slice(0, 90)}</span>` : ""}
               </td>
               <td>
@@ -3537,6 +3569,7 @@ function wireAdmin() {
   document.querySelectorAll("[data-contact-field]").forEach((field) => field.addEventListener("change", () => {
     const [contactId, path] = field.dataset.contactField.split(":");
     updateContactField(contactId, path, field.value);
+    if (path === "tags") render();
   }));
   document.querySelectorAll("[data-contact-boolean]").forEach((field) => field.addEventListener("change", () => {
     const [contactId, path] = field.dataset.contactBoolean.split(":");
