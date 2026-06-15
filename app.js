@@ -24,6 +24,7 @@ const seedState = {
   selectedSlot: "",
   selectedBookingDay: "",
   bookingCalendarMonth: "",
+  adminBookingCalendarMonth: "",
   bookingConfirmation: null,
   showAllBookingTimes: false,
   bookingOpenTracked: {},
@@ -321,7 +322,7 @@ function normalizeBookingFields(fields, legacyQuestions = []) {
 }
 
 function normalizeFirst24Intervals(value) {
-  const minutes = Array.isArray(value) ? value.map(Number).filter((minute) => minute > 0).slice(0, 3) : [];
+  const minutes = Array.isArray(value) ? value.map(Number).filter((minute) => minute > 0) : [];
   if (!minutes.length) return [...DEFAULT_FIRST24_FIBONACCI_MINUTES];
   if (minutes.join(",") === "5,8,13") return [...DEFAULT_FIRST24_FIBONACCI_MINUTES];
   return minutes;
@@ -743,7 +744,7 @@ function nextFollowUp(contact, tenant = activeTenant()) {
     ? followUp.first24FibonacciMinutes
     : DEFAULT_FIRST24_FIBONACCI_MINUTES;
   const first24Sent = Number(contact.first24FollowUpsSent || 0);
-  if (followUp.first24FibonacciEnabled !== false && !contact.booked && ageMinutes < 24 * 60 && first24Sent < 3) {
+  if (followUp.first24FibonacciEnabled !== false && !contact.booked && ageMinutes < 24 * 60 && first24Sent < fibonacci.length) {
     const elapsed = fibonacci.slice(0, first24Sent + 1).reduce((total, minutes) => total + Number(minutes || 0), 0);
     const target = addMinutes(createdAt, elapsed || 5);
     const best = bestContactTime(contact);
@@ -960,6 +961,189 @@ function formatCalendarDay(day) {
 function formatSlotTime(slot) {
   const date = parseSlotDate(bookingDayKey(slot), bookingSlotTime(slot));
   return date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+
+function bookingStatusLabel(status) {
+  return {
+    requested: "Requested",
+    confirmed: "Confirmed",
+    completed: "Completed",
+  }[status] || "Requested";
+}
+
+function bookingStatusClass(status) {
+  if (status === "completed") return "dark";
+  if (status === "confirmed") return "good";
+  return "info";
+}
+
+function bookingContactForBooking(tenant, booking) {
+  if (!tenant || !booking) return null;
+  return (tenant.contacts || []).find((contact) =>
+    contact.bookingId === booking.id ||
+    String(contact.email || "").toLowerCase() === String(booking.contactEmail || "").toLowerCase() ||
+    String(contact.phone || "").replace(/\D+/g, "") === String(booking.contactPhone || "").replace(/\D+/g, "") ||
+    String(contact.name || "").toLowerCase() === String(booking.contactName || "").toLowerCase()
+  ) || null;
+}
+
+function setContactFromBookingStatus(contact, booking, status) {
+  if (!contact || !booking) return;
+  contact.bookingId = booking.id;
+  contact.bookingSlot = booking.slot;
+  contact.bookingSummary = booking.summary || contact.bookingSummary || "";
+  contact.bookingAnswers = booking.answers || contact.bookingAnswers || [];
+  contact.bookingRemindersSent = contact.bookingRemindersSent || {};
+  contact.booked = status === "confirmed" || status === "completed";
+  contact.bookedDone = status === "completed";
+  contact.status = status === "completed" ? "booked_done" : status === "confirmed" ? "booked" : contact.status || "new";
+  contact.bookingCompletedAt = status === "completed" ? (contact.bookingCompletedAt || new Date().toISOString()) : "";
+}
+
+function updateBookingStatus(bookingId, status) {
+  const tenant = activeTenant();
+  const booking = tenant?.bookings.find((item) => item.id === bookingId);
+  if (!tenant || !booking || !["requested", "confirmed", "completed"].includes(status)) return;
+  booking.status = status;
+  booking.updatedAt = new Date().toISOString();
+  if (status === "confirmed") booking.confirmedAt = booking.confirmedAt || booking.updatedAt;
+  if (status === "completed") {
+    booking.confirmedAt = booking.confirmedAt || booking.updatedAt;
+    booking.completedAt = booking.completedAt || booking.updatedAt;
+  }
+  setContactFromBookingStatus(bookingContactForBooking(tenant, booking), booking, status);
+  addLog(`${booking.contactName || "Booking"} marked ${bookingStatusLabel(status).toLowerCase()}.`);
+  tenant.contacts = dedupeTenantContacts(tenant);
+  saveState();
+  render();
+}
+
+function cancelBooking(bookingId) {
+  const tenant = activeTenant();
+  const booking = tenant?.bookings.find((item) => item.id === bookingId);
+  if (!tenant || !booking) return;
+  if (!confirm(`Cancel and delete ${booking.contactName || "this booking"}?`)) return;
+  const contact = bookingContactForBooking(tenant, booking);
+  tenant.bookings = tenant.bookings.filter((item) => item.id !== bookingId);
+  if (contact?.bookingId === bookingId) {
+    contact.booked = false;
+    contact.bookedDone = false;
+    contact.bookingId = "";
+    contact.bookingSlot = "";
+    contact.bookingCompletedAt = "";
+    contact.bookingRemindersSent = {};
+    contact.status = "nurture";
+  }
+  addLog(`Canceled and deleted booking for ${booking.contactName || "customer"}.`);
+  tenant.contacts = dedupeTenantContacts(tenant);
+  saveState();
+  render();
+  showToast("Booking canceled and deleted.");
+}
+
+function adminCalendarMonthKey() {
+  if (state.adminBookingCalendarMonth) return state.adminBookingCalendarMonth;
+  return calendarMonthKey(now.getFullYear(), now.getMonth());
+}
+
+function bookingsForAdminMonth(tenant) {
+  const { year, month } = parseCalendarMonthKey(adminCalendarMonthKey());
+  const first = dayKeyFromParts(year, month, 1);
+  const last = dayKeyFromParts(year, month, new Date(year, month + 1, 0).getDate());
+  return (tenant.bookings || [])
+    .filter((booking) => {
+      const day = bookingDayKey(booking.slot);
+      return day >= first && day <= last;
+    })
+    .sort((a, b) => String(a.slot || "").localeCompare(String(b.slot || "")));
+}
+
+function renderAdminBookingCalendar(tenant) {
+  const monthKey = adminCalendarMonthKey();
+  const { year, month } = parseCalendarMonthKey(monthKey);
+  const monthLabel = new Date(year, month, 1).toLocaleDateString([], { month: "long", year: "numeric" });
+  const bookings = bookingsForAdminMonth(tenant);
+  const byDay = bookings.reduce((map, booking) => {
+    const day = bookingDayKey(booking.slot);
+    if (!map.has(day)) map.set(day, []);
+    map.get(day).push(booking);
+    return map;
+  }, new Map());
+  const cells = buildAdminBookingCalendarCells(year, month, byDay);
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  return `
+    <section class="section-head">
+      <div><h1>Calendar</h1><p>Review the full booking month, confirm requests, mark completed bookings, or cancel and delete bookings.</p></div>
+      <span class="status-pill info">${bookings.length} booking${bookings.length === 1 ? "" : "s"} this month</span>
+    </section>
+    <div class="grid two calendar-admin-layout">
+      <div class="panel">
+        <div class="month-calendar booking-admin-calendar">
+          <div class="calendar-nav">
+            <button type="button" class="btn ghost calendar-nav-btn" data-admin-calendar-prev aria-label="Previous month">Prev</button>
+            <strong>${escapeHtml(monthLabel)}</strong>
+            <button type="button" class="btn ghost calendar-nav-btn" data-admin-calendar-next aria-label="Next month">Next</button>
+          </div>
+          <div class="calendar-weekdays">${weekdays.map((label) => `<span>${label}</span>`).join("")}</div>
+          <div class="calendar-grid">
+            ${cells.map((cell) => {
+              if (cell.type === "empty") return `<span class="calendar-cell empty"></span>`;
+              const count = byDay.get(cell.key)?.length || 0;
+              return `<div class="calendar-cell ${count ? "has-bookings" : "disabled"}"><span>${cell.day}</span>${count ? `<b>${count}</b>` : ""}</div>`;
+            }).join("")}
+          </div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Month bookings</h2>
+        <div class="stack">
+          ${bookings.length ? bookings.map((booking) => renderAdminBookingItem(tenant, booking)).join("") : `<div class="empty">No bookings in ${escapeHtml(monthLabel)}.</div>`}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function buildAdminBookingCalendarCells(year, month, byDay) {
+  const startPad = new Date(year, month, 1).getDay();
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const cells = [];
+  for (let index = 0; index < startPad; index += 1) cells.push({ type: "empty" });
+  for (let day = 1; day <= daysInMonth; day += 1) {
+    const key = dayKeyFromParts(year, month, day);
+    cells.push({ type: byDay.has(key) ? "booked" : "blank", day, key });
+  }
+  while (cells.length % 7 !== 0) cells.push({ type: "empty" });
+  return cells;
+}
+
+function renderAdminBookingItem(tenant, booking) {
+  const contact = bookingContactForBooking(tenant, booking);
+  const status = booking.status || "requested";
+  const bookingAt = parseBookingSlot(booking.slot);
+  const timeLabel = bookingAt ? formatDateTime(bookingAt) : booking.slot || "No time";
+  return `
+    <div class="booking-item admin-booking-item">
+      <div class="booking-top">
+        <div>
+          <strong>${escapeHtml(booking.contactName || "Booking customer")}</strong>
+          <span class="muted">${escapeHtml(timeLabel)}${contact ? ` · ${escapeHtml(contact.name || "Contact")}` : ""}</span>
+        </div>
+        <span class="status-pill ${bookingStatusClass(status)}">${bookingStatusLabel(status)}</span>
+      </div>
+      <div class="booking-admin-meta">
+        ${booking.contactEmail ? `<span>${escapeHtml(booking.contactEmail)}</span>` : ""}
+        ${booking.contactPhone ? `<span>${escapeHtml(booking.contactPhone)}</span>` : ""}
+        <span>${escapeHtml(booking.source || "public link")}</span>
+      </div>
+      ${booking.summary ? `<pre class="summary-text">${escapeHtml(booking.summary)}</pre>` : ""}
+      <div class="inline-row">
+        ${status !== "confirmed" && status !== "completed" ? `<button class="btn small primary" data-confirm-booking="${escapeAttr(booking.id)}">Confirm</button>` : ""}
+        ${status !== "completed" ? `<button class="btn small" data-complete-booking="${escapeAttr(booking.id)}">Completed</button>` : ""}
+        <button class="btn small warn" data-cancel-booking="${escapeAttr(booking.id)}">Cancel/delete</button>
+      </div>
+    </div>
+  `;
 }
 
 function questionInputType(question) {
@@ -1763,9 +1947,10 @@ function sendFollowUp(contactId) {
   const template = tenant.templates.find((item) => item.name === tenant.messenger.postWindowTemplate) || tenant.templates[0];
   const body = plan.mode === "Utility template" && template ? template.text : message?.text || tenant.messenger.cta;
   if (plan.type === "first24_fibonacci") contact.first24FollowUpsSent = Number(contact.first24FollowUpsSent || 0) + 1;
-  contact.followUpsSent += 1;
+  else contact.followUpsSent += 1;
   contact.lastMessageAt = now.toISOString();
   contact.lastUserMessageAt = now.toISOString();
+  contact.engagement = Array.isArray(contact.engagement) ? contact.engagement : [];
   contact.engagement.push({ at: now.toISOString(), type: "message", source: "user" });
   if (message && plan.mode === "Human agent") message.sent += 1;
   addLog(`Sent ${plan.mode.toLowerCase()} to ${contact.name}: ${interpolate(body, contact, tenant)}`);
@@ -2331,6 +2516,7 @@ function renderAdmin() {
   const nav = [
     ["dashboard", "D", "Dashboard"],
     ["contacts", "C", "Contacts"],
+    ["calendar", "K", "Calendar"],
     ["automation", "A", "Automation"],
     ["booking", "B", "Booking Site"],
     ["availability", "T", "Availability"],
@@ -2428,6 +2614,7 @@ function renderFacebookPageList() {
 
 function renderView(tenant) {
   if (state.view === "contacts") return renderContactsPipeline(tenant);
+  if (state.view === "calendar") return renderAdminBookingCalendar(tenant);
   if (state.view === "automation") return renderAutomation(tenant);
   if (state.view === "booking") return renderBookingEditor(tenant);
   if (state.view === "availability") return renderAvailability(tenant);
@@ -3323,6 +3510,11 @@ function wireAdmin() {
   document.getElementById("copyMessengerLink")?.addEventListener("click", copyMessengerBookingLink);
   document.getElementById("copyEmbeddedPageLink")?.addEventListener("click", copyEmbeddedPageLink);
   document.querySelectorAll("[data-send]").forEach((button) => button.addEventListener("click", () => sendFollowUp(button.dataset.send)));
+  document.querySelectorAll("[data-admin-calendar-prev]").forEach((button) => button.addEventListener("click", () => shiftAdminBookingCalendarMonth(-1)));
+  document.querySelectorAll("[data-admin-calendar-next]").forEach((button) => button.addEventListener("click", () => shiftAdminBookingCalendarMonth(1)));
+  document.querySelectorAll("[data-confirm-booking]").forEach((button) => button.addEventListener("click", () => updateBookingStatus(button.dataset.confirmBooking, "confirmed")));
+  document.querySelectorAll("[data-complete-booking]").forEach((button) => button.addEventListener("click", () => updateBookingStatus(button.dataset.completeBooking, "completed")));
+  document.querySelectorAll("[data-cancel-booking]").forEach((button) => button.addEventListener("click", () => cancelBooking(button.dataset.cancelBooking)));
   document.querySelectorAll("[data-delete-contact]").forEach((button) => button.addEventListener("click", () => deleteContact(button.dataset.deleteContact)));
   document.querySelectorAll("[data-contact-field]").forEach((field) => field.addEventListener("change", () => {
     const [contactId, path] = field.dataset.contactField.split(":");
@@ -3434,6 +3626,14 @@ function shiftBookingCalendarMonth(direction, tenant = activeTenant()) {
   const { year, month } = parseCalendarMonthKey(monthKey);
   const next = new Date(year, month + direction, 1);
   state.bookingCalendarMonth = calendarMonthKey(next.getFullYear(), next.getMonth());
+  saveState();
+  render();
+}
+
+function shiftAdminBookingCalendarMonth(direction) {
+  const { year, month } = parseCalendarMonthKey(adminCalendarMonthKey());
+  const next = new Date(year, month + direction, 1);
+  state.adminBookingCalendarMonth = calendarMonthKey(next.getFullYear(), next.getMonth());
   saveState();
   render();
 }

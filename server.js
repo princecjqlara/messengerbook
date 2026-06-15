@@ -270,7 +270,7 @@ function normalizeBookingFields(fields, legacyQuestions = []) {
 }
 
 function normalizeFirst24Intervals(value) {
-  const minutes = Array.isArray(value) ? value.map(Number).filter((minute) => minute > 0).slice(0, 3) : [];
+  const minutes = Array.isArray(value) ? value.map(Number).filter((minute) => minute > 0) : [];
   if (!minutes.length) return [...DEFAULT_FIRST24_FIBONACCI_MINUTES];
   if (minutes.join(",") === "5,8,13") return [...DEFAULT_FIRST24_FIBONACCI_MINUTES];
   return minutes;
@@ -1025,9 +1025,94 @@ function nextFirst24FollowUpAt(contact, tenant) {
   const intervals = Array.isArray(tenant.followUp?.first24FibonacciMinutes) && tenant.followUp.first24FibonacciMinutes.length
     ? tenant.followUp.first24FibonacciMinutes
     : DEFAULT_FIRST24_FIBONACCI_MINUTES;
-  if (sent >= Math.min(3, intervals.length)) return null;
+  if (sent >= intervals.length) return null;
   const elapsed = intervals.slice(0, sent + 1).reduce((total, minute) => total + Number(minute || 0), 0);
   return new Date(createdAt.getTime() + elapsed * 60000);
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function respectQuietHours(date, followUp = {}) {
+  if (followUp.quietHoursEnabled === false) return date;
+  const quietStart = Number(String(followUp.quietHoursStart || "20:00").split(":")[0]);
+  const quietEnd = Number(String(followUp.quietHoursEnd || "08:00").split(":")[0]);
+  const hour = date.getHours();
+  const inQuiet = quietStart > quietEnd ? hour >= quietStart || hour < quietEnd : hour >= quietStart && hour < quietEnd;
+  if (inQuiet) date.setHours(Number.isFinite(quietEnd) ? quietEnd : 8, 0, 0, 0);
+  return date;
+}
+
+function nextScheduledContactFollowUp(contact, tenant) {
+  if (!contact || contact.booked) return null;
+  const followUp = tenant.followUp || {};
+  const last = new Date(contact.lastMessageAt || contact.lastInboundMessageAt || contact.createdAt || 0);
+  if (!Number.isFinite(last.getTime())) return null;
+  const pattern = Array.isArray(followUp.pattern) && followUp.pattern.length ? followUp.pattern : [1, 3, 3];
+  const sent = Number(contact.followUpsSent || 0);
+  let targetDay = 0;
+  for (let index = 0; index <= sent; index += 1) {
+    targetDay += index < pattern.length ? Number(pattern[index] || 1) : Number(followUp.afterWindowEveryDays || 7);
+  }
+  const target = addDays(last, targetDay);
+  const best = calculateBestContactTime(contact);
+  target.setHours(best.hour, best.minute, 0, 0);
+  respectQuietHours(target, followUp);
+  const sinceLastDays = Math.max(0, Math.floor((Date.now() - last.getTime()) / 86400000));
+  const mode = sinceLastDays >= Number(followUp.humanWindowDays || 7) ? "utility" : "human";
+  return { at: target, mode };
+}
+
+async function sendScheduledContactFollowUp(tenant, contact, origin, plan) {
+  if (!contact?.psid) return { sent: false, reason: "missing contact PSID" };
+  if (shouldSuppressBookingButton(contact, tenant)) {
+    return { sent: false, reason: `suppressed after team message for ${tenant.messenger?.suppressAfterUserMessageMinutes ?? 60} minutes` };
+  }
+  if (plan.mode === "utility") {
+    const template = (tenant.templates || []).find((item) => item.name === tenant.messenger?.postWindowTemplate) || (tenant.templates || [])[0];
+    if (template?.text) {
+      return sendMessengerButtonCard(tenant, contact, origin, template.text, tenant.messenger?.buttonLabel || "Book now", "scheduled_utility_follow_up");
+    }
+  }
+  let result = await sendAbFollowUpIfAvailable(tenant, contact, origin);
+  if (!result.sent) result = await sendBookingButtonIfAllowed(tenant, contact, origin);
+  return result;
+}
+
+async function scanScheduledContactFollowUps(origin = PUBLIC_ORIGIN) {
+  const tenants = await fetchTenants();
+  let sent = 0;
+  let skipped = 0;
+  let changed = false;
+  for (const tenant of tenants) {
+    for (const contact of tenant.contacts || []) {
+      const plan = nextScheduledContactFollowUp(contact, tenant);
+      if (!plan || plan.at > new Date()) {
+        skipped += 1;
+        continue;
+      }
+      try {
+        const result = await sendScheduledContactFollowUp(tenant, contact, origin, plan);
+        if (result.sent) {
+          contact.followUpsSent = Number(contact.followUpsSent || 0) + 1;
+          contact.lastMessageAt = new Date().toISOString();
+          tenantLog(tenant, `Sent ${plan.mode === "utility" ? "utility" : "human-window"} follow-up ${contact.followUpsSent} to ${contact.name}.`);
+          sent += 1;
+          changed = true;
+        } else {
+          skipped += 1;
+        }
+      } catch (error) {
+        tenantLog(tenant, `Scheduled follow-up failed for ${contact.name}: ${error.message}`);
+        changed = true;
+      }
+    }
+  }
+  if (changed) await upsertTenants(tenants);
+  return { sent, skipped };
 }
 
 async function scanAutomaticFollowUps(origin = PUBLIC_ORIGIN) {
@@ -1159,12 +1244,14 @@ async function runScheduledTasks(origin = PUBLIC_ORIGIN) {
   try {
     const startedAt = new Date().toISOString();
     await scanAutomaticFollowUps(origin);
+    const scheduled = await scanScheduledContactFollowUps(origin);
     const abandoned = await scanAbandonedBookingFollowUps(origin);
     const names = await refreshGenericContactNames();
     return {
       skipped: false,
       startedAt,
       finishedAt: new Date().toISOString(),
+      scheduled,
       abandoned,
       contactNamesChanged: Boolean(names.changed),
     };

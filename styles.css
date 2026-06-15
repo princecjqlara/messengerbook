@@ -1099,6 +1099,53 @@ button {
   box-shadow: inset 0 0 0 1px var(--teal);
 }
 
+.calendar-admin-layout {
+  align-items: start;
+}
+
+.booking-admin-calendar .calendar-cell {
+  flex-direction: column;
+  gap: 4px;
+}
+
+.booking-admin-calendar .calendar-cell.has-bookings {
+  border-color: var(--teal);
+  background: var(--teal-2);
+  font-weight: 800;
+}
+
+.booking-admin-calendar .calendar-cell b {
+  display: grid;
+  place-items: center;
+  min-width: 20px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--teal);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.admin-booking-item {
+  gap: 10px;
+}
+
+.booking-admin-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.booking-admin-meta span {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #f7f8f9;
+}
+
 .time-panel {
   margin-top: 16px;
   padding-top: 16px;
