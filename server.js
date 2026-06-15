@@ -558,6 +558,8 @@ function updateLastInboundMessage(contact, at, text) {
     contact.lastMessageAt = at;
     contact.lastMessageText = text || contact.lastMessageText || "";
     contact.lastMessageDirection = "inbound";
+    contact.first24SilenceStartedAt = at;
+    contact.first24FollowUpsSent = 0;
   }
 }
 
@@ -735,7 +737,14 @@ function abButtonLabel(message, tenant) {
 }
 
 function markFirst24SlotConsumed(contact) {
-  contact.first24FollowUpsSent = Math.max(1, Number(contact.first24FollowUpsSent || 0));
+  const silenceStartedAt = first24SilenceStartedAt(contact);
+  if (!silenceStartedAt) {
+    contact.first24FollowUpsSent = Math.max(1, Number(contact.first24FollowUpsSent || 0));
+    return;
+  }
+  const sent = first24SentForSilenceWindow(contact, silenceStartedAt);
+  contact.first24SilenceStartedAt = silenceStartedAt.toISOString();
+  contact.first24FollowUpsSent = sent + 1;
 }
 
 async function sendAbFollowUpIfAvailable(tenant, contact, origin) {
@@ -1031,18 +1040,39 @@ async function cancelBookingOpenFollowUp(input = {}) {
   return { canceled: true, contactId: contact.id };
 }
 
-function nextFirst24FollowUpAt(contact, tenant) {
+function first24SilenceStartedAt(contact) {
+  const date = new Date(contact.lastInboundMessageAt || contact.createdAt || contact.lastMessageAt || 0);
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function first24SentForSilenceWindow(contact, startedAt) {
+  if (!startedAt) return Number(contact.first24FollowUpsSent || 0);
+  const startedKey = startedAt.toISOString();
+  if (contact.first24SilenceStartedAt && contact.first24SilenceStartedAt !== startedKey) return 0;
+  return Number(contact.first24FollowUpsSent || 0);
+}
+
+function nextFirst24FollowUpPlan(contact, tenant) {
   if (tenant.followUp?.first24FibonacciEnabled === false || contact.booked) return null;
-  const createdAt = new Date(contact.createdAt || contact.lastInboundMessageAt || contact.lastMessageAt || 0);
-  if (!Number.isFinite(createdAt.getTime())) return null;
-  if (Date.now() - createdAt.getTime() >= 24 * 60 * 60 * 1000) return null;
-  const sent = Number(contact.first24FollowUpsSent || 0);
+  const silenceStartedAt = first24SilenceStartedAt(contact);
+  if (!silenceStartedAt) return null;
+  if (Date.now() - silenceStartedAt.getTime() >= 24 * 60 * 60 * 1000) return null;
+  const sent = first24SentForSilenceWindow(contact, silenceStartedAt);
   const intervals = Array.isArray(tenant.followUp?.first24FibonacciMinutes) && tenant.followUp.first24FibonacciMinutes.length
     ? tenant.followUp.first24FibonacciMinutes
     : DEFAULT_FIRST24_FIBONACCI_MINUTES;
   if (sent >= intervals.length) return null;
   const elapsed = intervals.slice(0, sent + 1).reduce((total, minute) => total + Number(minute || 0), 0);
-  return new Date(createdAt.getTime() + elapsed * 60000);
+  return {
+    at: new Date(silenceStartedAt.getTime() + elapsed * 60000),
+    silenceStartedAt,
+    sent,
+    minutes: intervals[sent] || intervals[intervals.length - 1],
+  };
+}
+
+function nextFirst24FollowUpAt(contact, tenant) {
+  return nextFirst24FollowUpPlan(contact, tenant)?.at || null;
 }
 
 function addDays(date, days) {
@@ -1138,15 +1168,16 @@ async function scanAutomaticFollowUps(origin = PUBLIC_ORIGIN) {
     let changed = false;
     for (const tenant of tenants) {
       for (const contact of tenant.contacts || []) {
-        const dueAt = nextFirst24FollowUpAt(contact, tenant);
-        if (!dueAt || dueAt > new Date()) continue;
+        const plan = nextFirst24FollowUpPlan(contact, tenant);
+        if (!plan || plan.at > new Date()) continue;
         if (!contact.psid || shouldSuppressBookingButton(contact, tenant)) continue;
         try {
           let result = await sendAbFollowUpIfAvailable(tenant, contact, origin);
           if (!result.sent) result = await sendBookingButtonIfAllowed(tenant, contact, origin);
           if (result.sent) {
-            contact.first24FollowUpsSent = Number(contact.first24FollowUpsSent || 0) + 1;
-            tenantLog(tenant, `Sent first-24-hour Fibonacci follow-up ${contact.first24FollowUpsSent} to ${contact.name}.`);
+            contact.first24SilenceStartedAt = plan.silenceStartedAt.toISOString();
+            contact.first24FollowUpsSent = plan.sent + 1;
+            tenantLog(tenant, `Sent intuition silence follow-up ${contact.first24FollowUpsSent} (${plan.minutes} min) to ${contact.name}.`);
             changed = true;
           }
         } catch (error) {

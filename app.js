@@ -772,6 +772,17 @@ function inboundMessageCount(contact) {
   return (contact.engagement || []).filter((event) => event.type === "reply").length;
 }
 
+function first24SilenceStartedAt(contact) {
+  const date = new Date(contact.lastInboundMessageAt || contact.createdAt || contact.lastMessageAt || now);
+  return Number.isFinite(date.getTime()) ? date : new Date(now);
+}
+
+function first24SentForSilenceWindow(contact, startedAt) {
+  const startedKey = startedAt.toISOString();
+  if (contact.first24SilenceStartedAt && contact.first24SilenceStartedAt !== startedKey) return 0;
+  return Number(contact.first24FollowUpsSent || 0);
+}
+
 function nextFollowUp(contact, tenant = activeTenant()) {
   if (!contact || !tenant) return { label: "No queue", mode: "None", nextAt: null };
   if (contact.booked) {
@@ -780,23 +791,24 @@ function nextFollowUp(contact, tenant = activeTenant()) {
     if (tenant.followUp?.bookedRegularFollowUpsEnabled !== true) return { label: "Booked", mode: "Complete", nextAt: null };
   }
   const followUp = tenant.followUp;
-  const createdAt = new Date(contact.createdAt || contact.lastInboundMessageAt || contact.lastMessageAt || now);
-  const ageMinutes = Math.max(0, Math.floor((now - createdAt) / 60000));
+  const silenceStartedAt = first24SilenceStartedAt(contact);
+  const ageMinutes = Math.max(0, Math.floor((now - silenceStartedAt) / 60000));
   const fibonacci = Array.isArray(followUp.first24FibonacciMinutes) && followUp.first24FibonacciMinutes.length
     ? followUp.first24FibonacciMinutes
     : DEFAULT_FIRST24_FIBONACCI_MINUTES;
-  const first24Sent = Number(contact.first24FollowUpsSent || 0);
+  const first24Sent = first24SentForSilenceWindow(contact, silenceStartedAt);
   if (followUp.first24FibonacciEnabled !== false && !contact.booked && ageMinutes < 24 * 60 && first24Sent < fibonacci.length) {
     const elapsed = fibonacci.slice(0, first24Sent + 1).reduce((total, minutes) => total + Number(minutes || 0), 0);
-    const target = addMinutes(createdAt, elapsed || 5);
+    const target = addMinutes(silenceStartedAt, elapsed || 5);
     const best = bestContactTime(contact);
     if (first24Sent > 0 && target < now) target.setHours(best.hour, best.minute, 0, 0);
     respectQuietHours(target, followUp);
     return {
       label: formatDateTime(target),
-      mode: `Fibonacci ${fibonacci[first24Sent] || fibonacci[fibonacci.length - 1]} min`,
+      mode: `Intuition silence ${fibonacci[first24Sent] || fibonacci[fibonacci.length - 1]} min`,
       nextAt: target,
       type: "first24_fibonacci",
+      silenceStartedAt: silenceStartedAt.toISOString(),
     };
   }
   const last = new Date(contact.lastMessageAt || contact.createdAt);
@@ -1990,7 +2002,12 @@ function sendFollowUp(contactId) {
   const message = bestMessages(tenant)[0];
   const template = tenant.templates.find((item) => item.name === tenant.messenger.postWindowTemplate) || tenant.templates[0];
   const body = plan.mode === "Utility template" && template ? template.text : message?.text || tenant.messenger.cta;
-  if (plan.type === "first24_fibonacci") contact.first24FollowUpsSent = Number(contact.first24FollowUpsSent || 0) + 1;
+  if (plan.type === "first24_fibonacci") {
+    const silenceStartedAt = new Date(plan.silenceStartedAt || first24SilenceStartedAt(contact).toISOString());
+    const first24Sent = first24SentForSilenceWindow(contact, silenceStartedAt);
+    contact.first24SilenceStartedAt = silenceStartedAt.toISOString();
+    contact.first24FollowUpsSent = first24Sent + 1;
+  }
   else contact.followUpsSent += 1;
   contact.lastMessageAt = now.toISOString();
   contact.lastUserMessageAt = now.toISOString();
@@ -3003,10 +3020,10 @@ function renderAutomation(tenant) {
           <label class="field"><span>After 7-day window, send every N days</span><input data-path="followUp.afterWindowEveryDays" type="number" min="1" value="${tenant.followUp.afterWindowEveryDays}"></label>
           <div class="message-item">
             <div class="message-top">
-              <strong>First 24 hours send schedule</strong>
+              <strong>Intuition silence follow-up</strong>
               <label class="inline-row"><input data-boolean-path="followUp.first24FibonacciEnabled" type="checkbox" ${tenant.followUp.first24FibonacciEnabled !== false ? "checked" : ""}> <span>Enabled</span></label>
             </div>
-            <label class="field"><span>Send after minutes</span><input data-path="followUp.first24FibonacciMinutes" value="${(tenant.followUp.first24FibonacciMinutes || DEFAULT_FIRST24_FIBONACCI_MINUTES).join(", ")}"><small class="muted">These times only decide when to send. The A/B panel decides message and button copy.</small></label>
+            <label class="field"><span>Silent minutes</span><input data-path="followUp.first24FibonacciMinutes" value="${(tenant.followUp.first24FibonacciMinutes || DEFAULT_FIRST24_FIBONACCI_MINUTES).join(", ")}"><small class="muted">Triggers when the contact has not replied for these minute spans after their latest message. The A/B panel decides message and button copy.</small></label>
           </div>
           <div class="message-item">
             <div class="message-top">
